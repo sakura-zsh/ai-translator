@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pacman -Q python-pip python-customtkinter)",
+      "Bash(pip list *)",
+      "Read(//usr/bin/**)",
+      "Read(//home/sakura/.local/bin/**)",
+      "Bash(chmod +x /home/sakura/.local/bin/ai-translator)",
+      "Bash(.venv/bin/python *)",
+      "Bash(python3 *)",
+      "Bash(rg -n \"primaryButton|QPushButton|QComboBox|QMenu\" app/ui/themes/*.qss)"
+    ]
+  }
+}

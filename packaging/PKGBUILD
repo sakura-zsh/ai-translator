@@ -1,0 +1,53 @@
+# Maintainer: sakura
+pkgname=ai-translator
+pkgver=0.1.0
+pkgrel=2
+pkgdesc="Lightweight AI translator for Wayland (CachyOS + niri)"
+arch=('any')
+url="https://github.com/anomalyco/ai-translator"
+license=('MIT')
+depends=(
+  'python>=3.11'
+  'pyside6'
+  'python-httpx'
+  'python-pillow'
+)
+makedepends=(
+  'python-build'
+  'python-installer'
+  'python-wheel'
+  'python-setuptools'
+)
+optdepends=(
+  'grim: Wayland screenshot capture'
+  'slurp: Wayland region selection'
+  'wl-clipboard: clipboard image paste'
+  'tesseract: OCR image translation mode'
+  'tesseract-data-eng: English OCR language data'
+  'tesseract-data-chi_sim: Simplified Chinese OCR language data'
+)
+source=("$pkgname-$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "$pkgname-$pkgver"
+  python -m build --wheel --no-isolation
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  python -m installer --destdir="$pkgdir" dist/*.whl
+
+  # Always install an explicit launcher (do not rely solely on wheel scripts).
+  install -Dm755 packaging/ai-translator \
+    "$pkgdir/usr/bin/ai-translator"
+
+  install -Dm644 packaging/ai-translator.desktop \
+    "$pkgdir/usr/share/applications/ai-translator.desktop"
+
+  install -Dm644 LICENSE \
+    "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+
+  install -Dm644 README.md \
+    "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

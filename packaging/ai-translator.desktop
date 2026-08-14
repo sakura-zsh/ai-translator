@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=AI Translator
+GenericName=AI Translator
+Comment=Lightweight AI translator for Wayland
+Exec=ai-translator
+Icon=accessories-dictionary
+Terminal=false
+Categories=Office;Utility;Translation;
+Keywords=translate;translation;AI;OCR;
+StartupNotify=true
