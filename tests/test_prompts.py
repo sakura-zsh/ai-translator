@@ -26,3 +26,22 @@ def test_vision_prompt() -> None:
     p = build_system_prompt("auto", "en", vision=True)
     assert "vision" in p.lower() or "image" in p.lower()
     assert "English" in p
+
+
+def test_swaps_when_input_already_target_language() -> None:
+    p = build_system_prompt("en", "zh")
+    assert "already written in Simplified Chinese" in p
+    assert "Automatically reverse" in p
+    assert "translate it into English instead" in p
+
+
+def test_auto_source_swaps_to_natural_counterpart() -> None:
+    p = build_system_prompt("auto", "zh")
+    assert "Automatically reverse" in p
+    assert "English if the text is Chinese" in p
+
+
+def test_vision_prompt_also_swaps_direction() -> None:
+    p = build_system_prompt("en", "zh", vision=True)
+    assert "Automatically reverse" in p
+    assert "translate it into English instead" in p

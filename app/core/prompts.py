@@ -15,6 +15,8 @@ def build_system_prompt(
     source = language_name_for_prompt(source_lang)
     target = language_name_for_prompt(target_lang)
 
+    swap_clause = _direction_swap_clause(source_lang, source, target)
+
     if vision:
         base = (
             "You are a professional translator with vision capabilities. "
@@ -25,6 +27,7 @@ def build_system_prompt(
                 else ", auto-detect the source language"
             )
             + f", then translate it into {target}. "
+            f"{swap_clause} "
             "Output only the translation. "
             "Preserve structure, line breaks, numbers, code, URLs, and proper nouns when appropriate. "
             "Do not add explanations, notes, quotes, or labels."
@@ -37,6 +40,7 @@ def build_system_prompt(
         base = (
             "You are a professional translator. "
             f"{source_clause} Translate the user's text into {target}. "
+            f"{swap_clause} "
             "Output only the translation. "
             "Preserve meaning, tone, formatting, code blocks, URLs, and placeholders. "
             "Do not add explanations, notes, quotes, or labels."
@@ -50,3 +54,20 @@ def build_system_prompt(
 
 def build_user_text_message(text: str) -> str:
     return text
+
+
+def _direction_swap_clause(source_lang: str, source: str, target: str) -> str:
+    """If the user forgot to swap languages, do not echo already-target text."""
+    if source_lang == "auto":
+        reverse_to = (
+            "the most likely intended language "
+            "(English if the text is Chinese; Simplified Chinese if the text is English; "
+            f"otherwise a natural counterpart of {target})"
+        )
+    else:
+        reverse_to = source
+    return (
+        f"If the input is already written in {target}, or is clearly not in the specified "
+        f"source language but already is {target}, do not echo it. Automatically reverse "
+        f"the direction and translate it into {reverse_to} instead."
+    )
