@@ -5,7 +5,8 @@ $ErrorActionPreference = "Stop"
 $WinDir = $PSScriptRoot
 $Root = Split-Path -Parent (Split-Path -Parent $WinDir)
 
-Write-Host "==> Installing PyInstaller"
+Write-Host "==> Installing project dependencies and PyInstaller"
+python -m pip install -r (Join-Path $Root "requirements.txt")
 python -m pip install --upgrade pyinstaller
 
 Write-Host "==> Building"
@@ -20,3 +21,24 @@ Get-ChildItem (Join-Path $WinDir "dist") | Format-Table Name, LastWriteTime
 Write-Host "Run:  packaging\windows\dist\ai-translator\ai-translator.exe"
 Write-Host "Note: OCR mode requires tesseract.exe on PATH"
 Write-Host "      (https://github.com/UB-Mannheim/tesseract/wiki)."
+
+# ── Installer (Inno Setup) ───────────────────────────────────────
+$IsccCandidates = @(
+    (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"),
+    (Join-Path $env:ProgramFiles "Inno Setup 6\ISCC.exe"),
+    (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe")
+)
+$Iscc = $IsccCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+if ($Iscc) {
+    Write-Host ""
+    Write-Host "==> Building installer with Inno Setup"
+    $Version = (Select-String -Path (Join-Path $Root "pyproject.toml") `
+        -Pattern '^version\s*=\s*"(.+)"').Matches[0].Groups[1].Value
+    Write-Host "    Version: $Version"
+    & $Iscc "/DAppVersion=$Version" (Join-Path $WinDir "ai-translator.iss")
+    if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
+    Write-Host "Installer: packaging\windows\installer\ai-translator-setup-$Version.exe"
+} else {
+    Write-Warning "Inno Setup not found - skipped installer build."
+    Write-Warning "Install with:  winget install JRSoftware.InnoSetup"
+}

@@ -15,4 +15,5 @@ packaging/linux/*.tar.gz
 packaging/linux/*.pkg.tar.*
 packaging/*/build/
 packaging/*/dist/
+packaging/*/installer/
 packaging/*.log
