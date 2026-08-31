@@ -46,6 +46,7 @@ class TranslationConfig:
     image_mode: Literal["ocr", "vision"] = "ocr"
     supplementary_prompt: str = ""
     ocr_langs: str = "eng+chi_sim"
+    auto_copy_result: bool = False
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> TranslationConfig:
@@ -54,6 +55,7 @@ class TranslationConfig:
         mode = kwargs.get("image_mode", "ocr")
         if mode not in ("ocr", "vision"):
             kwargs["image_mode"] = "ocr"
+        kwargs["auto_copy_result"] = bool(kwargs.get("auto_copy_result", False))
         return cls(**kwargs)
 
 
@@ -64,6 +66,7 @@ class HotkeysConfig:
     paste_image: str = "Ctrl+Shift+V"
     swap_langs: str = "Ctrl+Shift+X"
     copy_result: str = "Ctrl+Shift+C"
+    extract_text: str = "Ctrl+Shift+T"
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> HotkeysConfig:
@@ -112,14 +115,6 @@ class HistoryEntry:
         kwargs = {k: v for k, v in data.items() if k in known}
         return cls(**kwargs)
 
-    def menu_label(self) -> str:
-        src = " ".join((self.source_text or "").split())
-        if not src:
-            src = f"[{self.mode}]"
-        if len(src) > 36:
-            src = src[:36] + "…"
-        return f"{self.source_lang}→{self.target_lang}  {src}"
-
 
 @dataclass
 class AppConfig:
@@ -142,6 +137,22 @@ class AppConfig:
     @classmethod
     def default(cls) -> AppConfig:
         return cls()
+
+    def needs_setup(self) -> bool:
+        """True when still running on the untouched default profile.
+
+        Used to decide whether to offer the first-run provider wizard.
+        """
+        if len(self.profiles) != 1:
+            return False
+        p = self.profiles[0]
+        default = LlmProfile(id="default")
+        return (
+            p.id == "default"
+            and p.api_key == ""
+            and p.base_url == default.base_url
+            and p.model == default.model
+        )
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> AppConfig:

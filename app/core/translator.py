@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from app.config.schema import LlmProfile
+from app.core.imaging import downscale_for_vision
 from app.core.llm_client import LlmClient
 from app.core.ocr import OcrService
 from app.core.prompts import build_system_prompt
@@ -81,7 +82,8 @@ class Translator:
             result.mode = "ocr"
             return result
 
-        # vision
+        # vision — downscale/compress the payload first: full-res PNG
+        # screenshots cost far more tokens and upload time than they buy.
         system = build_system_prompt(
             source_lang,
             target_lang,
@@ -93,7 +95,7 @@ class Translator:
         out = client.chat_vision(
             system,
             "Translate the text visible in this image.",
-            image_png,
+            downscale_for_vision(image_png),
             model=model,
         )
         return TranslateResult(text=out, model=model, mode="vision")

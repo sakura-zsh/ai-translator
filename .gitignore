@@ -17,3 +17,4 @@ packaging/*/build/
 packaging/*/dist/
 packaging/*/installer/
 packaging/*.log
+.testlibs/

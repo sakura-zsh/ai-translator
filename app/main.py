@@ -9,6 +9,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from app.config.store import ConfigStore
+from app.ui.first_run_dialog import FirstRunDialog
 from app.ui.main_window import MainWindow
 from app.ui.widgets import apply_theme
 
@@ -37,6 +38,20 @@ def main() -> int:
 
     window = MainWindow(store, config)
     window.show()
+
+    # First run: offer the provider wizard (skippable, never forced).
+    if config.needs_setup():
+        wizard = FirstRunDialog(config.get_active_profile(), window)
+        if wizard.exec() == FirstRunDialog.DialogCode.Accepted:
+            profile = wizard.result_profile()
+            config.upsert_profile(profile)
+            config.active_profile_id = profile.id
+            try:
+                store.save(config)
+            except OSError:
+                pass
+            window.reload_config(config)
+
     return app.exec()
 
 

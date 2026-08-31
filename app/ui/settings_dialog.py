@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from PySide6.QtCore import Qt, QThreadPool
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -30,6 +31,8 @@ from PySide6.QtWidgets import (
 from app.config.schema import AppConfig, HotkeysConfig, LlmProfile, TranslationConfig, UiConfig
 from app.core.languages import TARGET_LANGUAGES
 from app.core.llm_client import LlmClient
+from app.core.providers import PROVIDER_TEMPLATES, ProviderTemplate, get_template
+from app.ui.widgets import ModelSelector
 from app.workers.tasks import FunctionWorker
 
 
@@ -37,7 +40,9 @@ class SettingsDialog(QDialog):
     def __init__(self, config: AppConfig, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("设置")
-        self.setMinimumSize(640, 520)
+        # +40px headroom: the two ModelSelector status lines are always
+        # reserved now so fetching models never squeezes the combo boxes.
+        self.setMinimumSize(640, 566)
         self._config = deepcopy(config)
         self._pool = QThreadPool.globalInstance()
         self._testing = False
@@ -98,8 +103,15 @@ class SettingsDialog(QDialog):
             "Chat Completions：经典 OpenAI 兼容接口。\n"
             "Responses：OpenAI Responses API，部分中转站仅支持此协议。"
         )
-        self.f_model = QLineEdit()
-        self.f_vision_model = QLineEdit()
+        self.f_template = QComboBox()
+        self.f_template.addItem("自定义（不更改）", "")
+        for t in PROVIDER_TEMPLATES:
+            self.f_template.addItem(t.name, t.id)
+        self.f_template.setToolTip(
+            "选择常用服务商可自动填入地址与推荐模型；随后用「获取模型」拉取真实列表。"
+        )
+        self.model_text = ModelSelector(lambda: self._profile_for_fetch())
+        self.model_vision = ModelSelector(lambda: self._profile_for_fetch())
         self.f_temperature = QDoubleSpinBox()
         self.f_temperature.setRange(0.0, 2.0)
         self.f_temperature.setSingleStep(0.1)
@@ -111,12 +123,13 @@ class SettingsDialog(QDialog):
         self.f_max_tokens.setRange(64, 128000)
         self.f_max_tokens.setSingleStep(256)
 
+        form.addRow("服务商模板", self.f_template)
         form.addRow("名称", self.f_name)
         form.addRow("Base URL", self.f_base_url)
         form.addRow("API Key", self.f_api_key)
         form.addRow("API 协议", self.f_protocol)
-        form.addRow("文本模型", self.f_model)
-        form.addRow("视觉模型", self.f_vision_model)
+        form.addRow("文本模型", self.model_text)
+        form.addRow("视觉模型", self.model_vision)
         form.addRow("Temperature", self.f_temperature)
         form.addRow("超时", self.f_timeout)
         form.addRow("Max tokens", self.f_max_tokens)
@@ -125,14 +138,15 @@ class SettingsDialog(QDialog):
             self.f_name,
             self.f_base_url,
             self.f_api_key,
-            self.f_model,
-            self.f_vision_model,
         ):
             w.editingFinished.connect(self._apply_form_to_current)
         self.f_protocol.currentIndexChanged.connect(lambda _i: self._apply_form_to_current())
+        self.model_text.combo.currentTextChanged.connect(lambda _t: self._apply_form_to_current())
+        self.model_vision.combo.currentTextChanged.connect(lambda _t: self._apply_form_to_current())
         self.f_temperature.valueChanged.connect(lambda _v: self._apply_form_to_current())
         self.f_timeout.valueChanged.connect(lambda _v: self._apply_form_to_current())
         self.f_max_tokens.valueChanged.connect(lambda _v: self._apply_form_to_current())
+        self.f_template.currentIndexChanged.connect(self._on_template_selected)
 
         test_row = QHBoxLayout()
         self.btn_test = QPushButton("测试连接")
@@ -182,9 +196,11 @@ class SettingsDialog(QDialog):
                 prev_profile.api_protocol = (
                     self.f_protocol.currentData() or "chat_completions"
                 )
-                prev_profile.model = self.f_model.text().strip() or prev_profile.model
+                prev_profile.model = (
+                    self.model_text.current_text() or prev_profile.model
+                )
                 prev_profile.vision_model = (
-                    self.f_vision_model.text().strip() or prev_profile.model
+                    self.model_vision.current_text() or prev_profile.model
                 )
                 prev_profile.temperature = float(self.f_temperature.value())
                 prev_profile.timeout_s = float(self.f_timeout.value())
@@ -202,26 +218,29 @@ class SettingsDialog(QDialog):
             self.f_base_url,
             self.f_api_key,
             self.f_protocol,
-            self.f_model,
-            self.f_vision_model,
             self.f_temperature,
             self.f_timeout,
             self.f_max_tokens,
         ]
         for w in widgets:
             w.blockSignals(True)
+        for sel in (self.model_text, self.model_vision):
+            sel.combo.blockSignals(True)
         self.f_name.setText(profile.name)
         self.f_base_url.setText(profile.base_url)
         self.f_api_key.setText(profile.api_key)
         idx = self.f_protocol.findData(profile.api_protocol or "chat_completions")
         self.f_protocol.setCurrentIndex(max(0, idx))
-        self.f_model.setText(profile.model)
-        self.f_vision_model.setText(profile.vision_model)
+        self.model_text.set_current_text(profile.model)
+        self.model_vision.set_current_text(profile.vision_model)
         self.f_temperature.setValue(profile.temperature)
         self.f_timeout.setValue(profile.timeout_s)
         self.f_max_tokens.setValue(profile.max_tokens)
+        for sel in (self.model_text, self.model_vision):
+            sel.combo.blockSignals(False)
         for w in widgets:
             w.blockSignals(False)
+        self._reset_template_combo()
         self.test_status.setText("")
 
     def _apply_form_to_current(self) -> None:
@@ -232,11 +251,44 @@ class SettingsDialog(QDialog):
         profile.base_url = self.f_base_url.text().strip() or profile.base_url
         profile.api_key = self.f_api_key.text()
         profile.api_protocol = self.f_protocol.currentData() or "chat_completions"
-        profile.model = self.f_model.text().strip() or profile.model
-        profile.vision_model = self.f_vision_model.text().strip() or profile.model
+        profile.model = self.model_text.current_text() or profile.model
+        profile.vision_model = self.model_vision.current_text() or profile.model
         profile.temperature = float(self.f_temperature.value())
         profile.timeout_s = float(self.f_timeout.value())
         profile.max_tokens = int(self.f_max_tokens.value())
+        item = self.profile_list.currentItem()
+        if item:
+            item.setText(profile.name)
+
+    def _profile_for_fetch(self) -> LlmProfile | None:
+        """Current profile with unsaved form edits applied (for /models)."""
+        self._apply_form_to_current()
+        return self._current_profile()
+
+    def _reset_template_combo(self) -> None:
+        self.f_template.blockSignals(True)
+        self.f_template.setCurrentIndex(0)
+        self.f_template.blockSignals(False)
+
+    def _on_template_selected(self, _index: int) -> None:
+        template_id = self.f_template.currentData()
+        template: ProviderTemplate | None = (
+            get_template(template_id) if template_id else None
+        )
+        if template is None:
+            return
+        self._apply_form_to_current()
+        profile = self._current_profile()
+        if profile is None:
+            return
+        profile.base_url = template.base_url
+        profile.api_protocol = template.api_protocol  # type: ignore[assignment]
+        profile.name = template.name
+        if template.text_model:
+            profile.model = template.text_model
+        if template.vision_model:
+            profile.vision_model = template.vision_model
+        self._fill_form(profile)
         item = self.profile_list.currentItem()
         if item:
             item.setText(profile.name)
@@ -298,10 +350,10 @@ class SettingsDialog(QDialog):
         text = str(reply)[:80]
         self.test_status.setText(f"成功：{text}")
 
-    def _on_test_err(self, message: str) -> None:
+    def _on_test_err(self, exc: object) -> None:
         self._testing = False
         self.btn_test.setEnabled(True)
-        self.test_status.setText(f"失败：{message}")
+        self.test_status.setText(f"失败：{exc}")
 
     # ── Translation tab ───────────────────────────────────────────
     def _build_translation_tab(self) -> None:
@@ -323,6 +375,9 @@ class SettingsDialog(QDialog):
         self.t_ocr_langs = QLineEdit(self._config.translation.ocr_langs)
         self.t_ocr_langs.setPlaceholderText("eng+chi_sim")
 
+        self.t_autocopy = QCheckBox("翻译完成后自动复制结果到剪贴板")
+        self.t_autocopy.setChecked(self._config.translation.auto_copy_result)
+
         self.t_prompt = QPlainTextEdit()
         self.t_prompt.setPlaceholderText(
             "可选：补充提示词，例如「使用正式书面语」「保留术语英文原文」"
@@ -333,6 +388,7 @@ class SettingsDialog(QDialog):
         form.addRow("默认目标语言", self.t_target)
         form.addRow("图片翻译模式", self.t_image_mode)
         form.addRow("OCR 语言包", self.t_ocr_langs)
+        form.addRow("", self.t_autocopy)
         form.addRow("补充提示词", self.t_prompt)
 
         hint = QLabel("补充提示词会附加到系统提示之后，用于指定语气、领域或术语偏好。")
@@ -357,12 +413,14 @@ class SettingsDialog(QDialog):
         hk = self._config.ui.hotkeys
         self.h_translate = QLineEdit(hk.translate)
         self.h_screenshot = QLineEdit(hk.screenshot)
+        self.h_extract = QLineEdit(hk.extract_text)
         self.h_paste = QLineEdit(hk.paste_image)
         self.h_swap = QLineEdit(hk.swap_langs)
         self.h_copy = QLineEdit(hk.copy_result)
 
         form.addRow("翻译", self.h_translate)
         form.addRow("截图翻译", self.h_screenshot)
+        form.addRow("提取文字", self.h_extract)
         form.addRow("粘贴图片", self.h_paste)
         form.addRow("交换语种", self.h_swap)
         form.addRow("复制结果", self.h_copy)
@@ -388,6 +446,7 @@ class SettingsDialog(QDialog):
             image_mode=self.t_image_mode.currentData() or "ocr",
             supplementary_prompt=self.t_prompt.toPlainText().strip(),
             ocr_langs=self.t_ocr_langs.text().strip() or "eng+chi_sim",
+            auto_copy_result=self.t_autocopy.isChecked(),
         )
         self._config.ui = UiConfig(
             theme=self.u_theme.currentData() or "dark",
@@ -399,6 +458,7 @@ class SettingsDialog(QDialog):
                 paste_image=self.h_paste.text().strip() or "Ctrl+Shift+V",
                 swap_langs=self.h_swap.text().strip() or "Ctrl+Shift+X",
                 copy_result=self.h_copy.text().strip() or "Ctrl+Shift+C",
+                extract_text=self.h_extract.text().strip() or "Ctrl+Shift+T",
             ),
         )
         self.accept()

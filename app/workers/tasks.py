@@ -10,8 +10,9 @@ from PySide6.QtCore import QObject, QRunnable, Signal, Slot
 
 class WorkerSignals(QObject):
     finished = Signal(object)
-    error = Signal(str)
-    status = Signal(str)
+    # Exception instance (preserves the type so callers can branch on it,
+    # e.g. ScreenshotCancelled vs. real failures) — never a bare string.
+    error = Signal(object)
 
 
 class FunctionWorker(QRunnable):
@@ -30,6 +31,6 @@ class FunctionWorker(QRunnable):
         try:
             result = self.fn(*self.args, **self.kwargs)
         except Exception as exc:  # noqa: BLE001 — surface any failure to UI
-            self.signals.error.emit(str(exc))
+            self.signals.error.emit(exc)
             return
         self.signals.finished.emit(result)

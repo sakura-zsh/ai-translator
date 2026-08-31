@@ -28,7 +28,11 @@ def build_system_prompt(
             )
             + f", then translate it into {target}. "
             f"{swap_clause} "
-            "Output only the translation. "
+            "Output only the final translation text, never your reasoning, "
+            "analysis, or thinking process. "
+            "Wrap the final translation in <final_translation> and "
+            "</final_translation> tags. Only the text between these tags is "
+            "delivered to the user; keep any reasoning outside them. "
             "Preserve structure, line breaks, numbers, code, URLs, and proper nouns when appropriate. "
             "Do not add explanations, notes, quotes, or labels."
         )
@@ -41,7 +45,11 @@ def build_system_prompt(
             "You are a professional translator. "
             f"{source_clause} Translate the user's text into {target}. "
             f"{swap_clause} "
-            "Output only the translation. "
+            "Output only the final translation text, never your reasoning, "
+            "analysis, or thinking process. "
+            "Wrap the final translation in <final_translation> and "
+            "</final_translation> tags. Only the text between these tags is "
+            "delivered to the user; keep any reasoning outside them. "
             "Preserve meaning, tone, formatting, code blocks, URLs, and placeholders. "
             "Do not add explanations, notes, quotes, or labels."
         )
@@ -50,10 +58,6 @@ def build_system_prompt(
     if extra:
         base = f"{base}\n\nAdditional instructions from the user:\n{extra}"
     return base
-
-
-def build_user_text_message(text: str) -> str:
-    return text
 
 
 def _direction_swap_clause(source_lang: str, source: str, target: str) -> str:
@@ -67,7 +71,9 @@ def _direction_swap_clause(source_lang: str, source: str, target: str) -> str:
     else:
         reverse_to = source
     return (
-        f"If the input is already written in {target}, or is clearly not in the specified "
-        f"source language but already is {target}, do not echo it. Automatically reverse "
-        f"the direction and translate it into {reverse_to} instead."
+        f"If the input is already written in {target}, automatically reverse "
+        f"the direction and translate it into {reverse_to} instead. "
+        "If the input contains no translatable natural language (only code, "
+        "shell commands, file paths, numbers, or identifiers), return it "
+        "unchanged without commentary."
     )

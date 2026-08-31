@@ -68,6 +68,74 @@ def test_corrupt_config_falls_back(tmp_path: Path) -> None:
     assert cfg.profiles
 
 
+def test_load_survives_unwritable_location(tmp_path: Path) -> None:
+    # Parent "directory" is actually a regular file → first-run save raises
+    # OSError. load() must degrade to in-memory defaults instead of crashing.
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("x", encoding="utf-8")
+    store = ConfigStore(blocker / "config.json")
+    cfg = store.load()
+    assert cfg.profiles
+    assert cfg.get_active_profile().id == "default"
+    assert not (blocker / "config.json").exists()
+
+
+# ── new v0.2 fields & first-run detection ─────────────────────────
+def test_new_fields_defaults_and_roundtrip() -> None:
+    cfg = AppConfig.default()
+    assert cfg.translation.auto_copy_result is False
+    assert cfg.ui.hotkeys.extract_text == "Ctrl+Shift+T"
+
+    cfg.translation.auto_copy_result = True
+    cfg.ui.hotkeys.extract_text = "Ctrl+Shift+E"
+    restored = AppConfig.from_dict(cfg.to_dict())
+    assert restored.translation.auto_copy_result is True
+    assert restored.ui.hotkeys.extract_text == "Ctrl+Shift+E"
+
+
+def test_legacy_config_gets_new_defaults() -> None:
+    # Old config JSON without the new fields must load cleanly.
+    legacy = {
+        "version": 1,
+        "active_profile_id": "default",
+        "profiles": [
+            {
+                "id": "default",
+                "name": "OpenAI-compatible",
+                "base_url": "https://api.openai.com/v1",
+                "api_key": "sk-old",
+                "model": "gpt-4o-mini",
+                "vision_model": "gpt-4o-mini",
+                "temperature": 0.2,
+                "timeout_s": 60.0,
+                "max_tokens": 4096,
+            }
+        ],
+        "translation": {"source_lang": "auto", "target_lang": "zh"},
+        "ui": {"theme": "dark"},
+        "history": [],
+    }
+    cfg = AppConfig.from_dict(legacy)
+    assert cfg.translation.auto_copy_result is False
+    assert cfg.ui.hotkeys.extract_text == "Ctrl+Shift+T"
+
+
+def test_needs_setup_flags_untouched_default() -> None:
+    assert AppConfig.default().needs_setup() is True
+
+    cfg = AppConfig.default()
+    cfg.profiles[0].api_key = "sk-something"
+    assert cfg.needs_setup() is False
+
+    cfg = AppConfig.default()
+    cfg.profiles[0].base_url = "https://api.deepseek.com/v1"
+    assert cfg.needs_setup() is False
+
+    cfg = AppConfig.default()
+    cfg.profiles.append(LlmProfile(id="p2", name="second"))
+    assert cfg.needs_setup() is False
+
+
 def test_history_keeps_ten_newest() -> None:
     cfg = AppConfig.default()
     for i in range(12):

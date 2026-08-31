@@ -8,6 +8,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from app.core.imaging import prepare_for_ocr
+
 
 class OcrError(Exception):
     pass
@@ -40,6 +42,9 @@ class OcrService:
             raise OcrError(f"tesseract not found. {install_hint()}")
         if not image_png:
             raise OcrError("Empty image")
+
+        # Small screenshots (UI text) benefit hugely from a 2x upscale.
+        image_png = prepare_for_ocr(image_png)
 
         with tempfile.TemporaryDirectory(prefix="ai-translator-ocr-") as tmp:
             img_path = Path(tmp) / "input.png"

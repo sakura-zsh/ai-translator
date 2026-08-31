@@ -41,6 +41,12 @@ class ClipboardImageService:
     def read_png(self) -> bytes:
         types = self.list_types()
         image_types = [t for t in types if t.startswith("image/")]
+        if types and not image_types:
+            # Types are known and contain no image — fail fast instead of
+            # spawning one wl-paste per candidate mime below. This keeps
+            # plain-text paste (the common case) from doing ~6 subprocess
+            # round-trips before falling back to Qt.
+            raise ClipboardImageError("Clipboard has no image data")
         if not image_types:
             # Prefer common order if list is empty/odd
             candidates = [

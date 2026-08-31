@@ -59,6 +59,7 @@ class MainWindow(QMainWindow):
         self.pool = QThreadPool.globalInstance()
         self._busy = False
         self._current_image: bytes | None = None
+        self._after_capture: str = "translate"  # "translate" | "extract"
         self._shortcuts: list[QShortcut] = []
 
         self.setWindowTitle("AI Translator")
@@ -180,13 +181,16 @@ class MainWindow(QMainWindow):
         root.addWidget(splitter, 1)
 
         # Bottom actions: left 4 under 原文, right 2 under 译文
-        # [翻译] [截图翻译] [粘贴图片] [清空]  ……  [复制结果] [设置]
+        # [翻译] [截图翻译] [提取文字] [粘贴图片] [清空]  ……  [复制结果] [设置]
         actions = QHBoxLayout()
         self.btn_translate = QPushButton("翻译")
         self.btn_translate.setObjectName("primaryButton")
         self.btn_translate.clicked.connect(self._on_translate)
         self.btn_screenshot = QPushButton("截图翻译")
         self.btn_screenshot.clicked.connect(self._on_screenshot)
+        self.btn_extract = QPushButton("提取文字")
+        self.btn_extract.setToolTip("对当前图片 / 新截图做 OCR，提取文字到原文框（不翻译）")
+        self.btn_extract.clicked.connect(self._on_extract_text)
         self.btn_paste_img = QPushButton("粘贴图片")
         self.btn_paste_img.clicked.connect(self._on_paste_image)
         self.btn_clear = QPushButton("清空")
@@ -198,6 +202,7 @@ class MainWindow(QMainWindow):
 
         actions.addWidget(self.btn_translate)
         actions.addWidget(self.btn_screenshot)
+        actions.addWidget(self.btn_extract)
         actions.addWidget(self.btn_paste_img)
         actions.addWidget(self.btn_clear)
         actions.addStretch(1)
@@ -246,35 +251,49 @@ class MainWindow(QMainWindow):
         self._update_swap_enabled()
 
     def _persist(self) -> None:
-        # Sync live UI choices into config
+        """Sync live UI choices into the in-memory config (no disk I/O)."""
         self.config.active_profile_id = self.profile_combo.currentData() or self.config.active_profile_id
         self.config.translation.source_lang = self.source_combo.currentData() or "auto"
         self.config.translation.target_lang = self.target_combo.currentData() or "zh"
         self.config.translation.image_mode = "vision" if self.mode_vision.isChecked() else "ocr"
         self.config.ui.window_width = self.width()
         self.config.ui.window_height = self.height()
-        self.store.save(self.config)
+
+    def _save_config(self) -> bool:
+        """Write config to disk; surface failures instead of raising."""
+        try:
+            self.store.save(self.config)
+            return True
+        except OSError as exc:
+            self._set_status(f"配置保存失败：{exc}")
+            return False
 
     def _on_profile_changed(self, _index: int) -> None:
         pid = self.profile_combo.currentData()
         if pid:
             self.config.active_profile_id = pid
-            self.store.save(self.config)
+            self._save_config()
             profile = self.config.get_active_profile()
             self._set_status(f"已切换配置：{profile.name} · {profile.model}")
 
     def _open_settings(self) -> None:
         self._persist()
+        self._save_config()
         dlg = SettingsDialog(self.config, self)
         if dlg.exec() != SettingsDialog.DialogCode.Accepted:
             return
         self.config = dlg.result_config()
-        self.store.save(self.config)
+        self._save_config()
+        self.reload_config(self.config)
+        self._set_status("设置已保存")
+
+    def reload_config(self, config: AppConfig) -> None:
+        """Adopt an externally-updated config (settings dialog / wizard)."""
+        self.config = config
         apply_theme(QApplication.instance(), self.config.ui.theme)  # type: ignore[arg-type]
         self._reload_profiles()
         self._apply_translation_defaults()
         self._install_hotkeys()
-        self._set_status("设置已保存")
 
     # ── Hotkeys ───────────────────────────────────────────────────
     def _install_hotkeys(self) -> None:
@@ -286,6 +305,7 @@ class MainWindow(QMainWindow):
         mapping = [
             (hk.translate, self._on_translate),
             (hk.screenshot, self._on_screenshot),
+            (hk.extract_text, self._on_extract_text),
             (hk.paste_image, self._on_paste_image),
             (hk.swap_langs, self._swap_langs),
             (hk.copy_result, self._on_copy_result),
@@ -328,6 +348,7 @@ class MainWindow(QMainWindow):
         for w in (
             self.btn_translate,
             self.btn_screenshot,
+            self.btn_extract,
             self.btn_paste_img,
             self.btn_settings,
             self.profile_combo,
@@ -388,6 +409,11 @@ class MainWindow(QMainWindow):
         if result.ocr_text and not self.source_edit.toPlainText().strip():
             self.source_edit.setPlainText(result.ocr_text)
 
+        copied = ""
+        if self.config.translation.auto_copy_result and result.text.strip():
+            if self._copy_text_to_clipboard(result.text):
+                copied = " · 已复制到剪贴板"
+
         source_text = self.source_edit.toPlainText().strip()
         if not source_text:
             if result.ocr_text:
@@ -401,7 +427,7 @@ class MainWindow(QMainWindow):
             model=result.model,
         )
         self._set_status(
-            f"完成 · mode={result.mode} · model={result.model} · {elapsed:.2f}s"
+            f"完成 · mode={result.mode} · model={result.model} · {elapsed:.2f}s{copied}"
         )
 
     # ── History ──────────────────────────────────────────────────
@@ -423,10 +449,7 @@ class MainWindow(QMainWindow):
             result_text=result_text,
             model=model,
         )
-        try:
-            self.store.save(self.config)
-        except OSError:
-            pass
+        self._save_config()
         if self.history_panel.isVisible():
             self.history_panel.set_entries(self.config.history)
 
@@ -481,10 +504,7 @@ class MainWindow(QMainWindow):
         ):
             return
         self.config.clear_history()
-        try:
-            self.store.save(self.config)
-        except OSError:
-            pass
+        self._save_config()
         self.history_panel.set_entries([])
         self._set_status("历史已清空")
 
@@ -512,8 +532,9 @@ class MainWindow(QMainWindow):
             )
             self.history_panel.show_at(br)
 
-    def _on_translate_err(self, message: str) -> None:
+    def _on_translate_err(self, exc: object) -> None:
         self._set_busy(False)
+        message = str(exc)
         self._set_status(f"失败：{message}")
         QMessageBox.warning(self, "翻译失败", message)
 
@@ -577,8 +598,21 @@ class MainWindow(QMainWindow):
         self.pool.start(worker)
 
     def _on_screenshot(self) -> None:
+        self._begin_capture("translate")
+
+    def _on_extract_text(self) -> None:
         if self._busy:
             return
+        if self._current_image is not None:
+            self._extract_text_from_image(self._current_image)
+            return
+        self._begin_capture("extract")
+
+    def _begin_capture(self, action: str) -> None:
+        """Screenshot then dispatch: action = "translate" | "extract"."""
+        if self._busy:
+            return
+        self._after_capture = action
         if not self.screenshot.available():
             if self.screenshot.requires_gui_thread:
                 QMessageBox.warning(
@@ -640,7 +674,10 @@ class MainWindow(QMainWindow):
             return
 
         self._show_image_preview(png)
-        self._translate_image(png)
+        if self._after_capture == "extract":
+            self._extract_text_from_image(png)
+        else:
+            self._translate_image(png)
 
     def _on_screenshot_ok(self, png: object) -> None:
         self._set_busy(False)
@@ -649,21 +686,58 @@ class MainWindow(QMainWindow):
             return
         data = bytes(png)
         self._show_image_preview(data)
-        # OCR mode: put recognized text into source after translate; clear text for image path
-        if not self.source_edit.toPlainText().strip():
-            pass
-        self._translate_image(data)
+        if self._after_capture == "extract":
+            self._extract_text_from_image(data)
+        else:
+            self._translate_image(data)
 
-    def _on_screenshot_err(self, message: str) -> None:
+    def _on_screenshot_err(self, exc: object) -> None:
         self._set_busy(False)
-        if "cancelled" in message.lower() or "取消" in message:
+        if isinstance(exc, ScreenshotCancelled):
             self._set_status("已取消截图")
             return
+        message = str(exc)
         self._set_status(f"截图失败：{message}")
-        # ScreenshotCancelled comes through as string
-        if "Screenshot cancelled" in message:
-            return
         QMessageBox.warning(self, "截图失败", message)
+
+    # ── Extract text (OCR only, no translation) ───────────────────
+    def _extract_text_from_image(self, png: bytes) -> None:
+        if self._busy:
+            return
+        if not self.translator.ocr.available():
+            QMessageBox.warning(
+                self,
+                "缺少 tesseract",
+                f"提取文字需要 tesseract。\n{install_hint()}\n或改用截图翻译。",
+            )
+            return
+        langs = self.config.translation.ocr_langs
+        self._set_busy(True, "提取文字中…")
+
+        def work() -> str:
+            return self.translator.ocr.extract_text(png, langs=langs)
+
+        worker = FunctionWorker(work)
+        worker.signals.finished.connect(self._on_extract_ok)
+        worker.signals.error.connect(self._on_extract_err)
+        self.pool.start(worker)
+
+    def _on_extract_ok(self, text: object) -> None:
+        self._set_busy(False)
+        content = text.strip() if isinstance(text, str) else ""
+        if not content:
+            self._set_status("未识别到文字")
+            QMessageBox.information(self, "提取文字", "没有从图片中识别到文字。")
+            return
+        self.source_edit.setPlainText(content)
+        self._copy_text_to_clipboard(content)
+        self._set_status(f"已提取 {len(content)} 个字符，已放入原文框并复制到剪贴板")
+
+    def _on_extract_err(self, exc: object) -> None:
+        self._set_busy(False)
+        message = str(exc)
+        self._set_status(f"提取文字失败：{message}")
+        QMessageBox.warning(self, "提取文字失败", message)
 
     def _probe_clipboard_image(self) -> bytes | None:
         """供原文框 Ctrl+V 探测；失败返回 None，不弹窗。"""
@@ -746,23 +820,36 @@ class MainWindow(QMainWindow):
         if not text.strip():
             self._set_status("没有可复制的译文")
             return
-        # Prefer wl-copy on Wayland for reliability; fall back to Qt clipboard
+        if self._copy_text_to_clipboard(text):
+            self._set_status("译文已复制到剪贴板")
+        else:
+            self._set_status("复制失败：剪贴板不可用")
+
+    def _copy_text_to_clipboard(self, text: str) -> bool:
+        """Prefer wl-copy on Wayland for reliability; fall back to Qt clipboard."""
         if shutil.which("wl-copy"):
             try:
                 subprocess.run(
                     ["wl-copy"],
                     input=text.encode("utf-8"),
-                    check=False,
+                    check=True,  # a failed wl-copy must fall back, not lie
                     timeout=5,
                 )
-                self._set_status("译文已复制到剪贴板")
-                return
-            except (OSError, subprocess.TimeoutExpired):
+                return True
+            except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
                 pass
-        QApplication.clipboard().setText(text)
-        self._set_status("译文已复制到剪贴板")
+        clipboard = QApplication.clipboard()
+        if clipboard is None:
+            return False
+        clipboard.setText(text)
+        return True
 
     # ── Lifecycle ─────────────────────────────────────────────────
     def closeEvent(self, event) -> None:  # noqa: N802
+        # Grace period for in-flight workers so their signals don't arrive
+        # after teardown; queued-but-unstarted tasks are dropped.
+        self.pool.clear()
+        self.pool.waitForDone(2000)
         self._persist()
+        self._save_config()
         super().closeEvent(event)

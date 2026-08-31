@@ -35,7 +35,12 @@ class ConfigStore:
     def load(self) -> AppConfig:
         if not self.path.exists():
             config = AppConfig.default()
-            self.save(config)
+            # Best-effort first-run write; a read-only HOME or full disk must
+            # not crash startup — we simply run on in-memory defaults.
+            try:
+                self.save(config)
+            except OSError:
+                pass
             return config
         try:
             raw = self.path.read_text(encoding="utf-8")

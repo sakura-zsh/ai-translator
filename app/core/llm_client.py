@@ -3,11 +3,59 @@
 from __future__ import annotations
 
 import base64
+import re
 from typing import Any
 
 import httpx
 
 from app.config.schema import LlmProfile
+from app.core.imaging import sniff_image_mime
+
+# Reasoning models (DeepSeek-R1, QwQ, distills…) sometimes inline their
+# chain-of-thought in `content` inside tags — especially on relays / local
+# servers without a reasoning parser. Strip these before showing anything.
+_REASONING_TAGS = r"think|thinking|reasoning"
+_REASONING_BLOCK_RE = re.compile(
+    rf"<({_REASONING_TAGS})\b[^>]*>.*?</\1\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_REASONING_UNCLOSED_RE = re.compile(
+    rf"<({_REASONING_TAGS})\b[^>]*>.*\Z",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# The system prompt asks models to wrap the final answer in these tags; the
+# client extracts only what is between them. Reasoning outside the tags is
+# discarded by construction — the robust fix for leaked chain-of-thought.
+_FINAL_PAIR_RE = re.compile(
+    r"<final_translation>\s*(.*?)\s*</final_translation>",
+    re.IGNORECASE | re.DOTALL,
+)
+_FINAL_UNCLOSED_RE = re.compile(
+    r"<final_translation>\s*(.+)\Z",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def extract_tagged_final(text: str) -> str:
+    """Return the first non-empty <final_translation>…</final_translation>
+    pair; an unclosed opening tag falls back to "rest of the text" (the
+    answer up to a truncated stream). Returns '' when no tag is present."""
+    for m in _FINAL_PAIR_RE.finditer(text):
+        if m.group(1).strip():
+            return m.group(1).strip()
+    m = _FINAL_UNCLOSED_RE.search(text)
+    if m and m.group(1).strip():
+        return m.group(1).strip()
+    return ""
+
+
+def strip_reasoning(text: str) -> str:
+    """Remove <think>/<thinking>/<reasoning> blocks from a model reply."""
+    text = _REASONING_BLOCK_RE.sub("", text)
+    # Unclosed tag (truncated stream): drop everything after the opening tag.
+    text = _REASONING_UNCLOSED_RE.sub("", text)
+    return text.strip()
 
 
 class LlmError(Exception):
@@ -40,21 +88,22 @@ class LlmClient:
     def protocol(self) -> str:
         return getattr(self.profile, "api_protocol", None) or "chat_completions"
 
-    def _endpoint(self) -> str:
+    def _api_base(self) -> str:
+        """Base URL without any endpoint suffix the user may have pasted."""
         base = self.profile.base_url.rstrip("/")
-        if self.protocol == "responses":
-            if base.endswith("/responses"):
-                return base
-            # Allow pasting a full chat endpoint by accident
-            if base.endswith("/chat/completions"):
-                base = base[: -len("/chat/completions")]
-            return f"{base}/responses"
+        for suffix in ("/chat/completions", "/responses"):
+            if base.endswith(suffix):
+                base = base[: -len(suffix)]
+        return base
 
-        if base.endswith("/chat/completions"):
-            return base
-        if base.endswith("/responses"):
-            base = base[: -len("/responses")]
+    def _endpoint(self) -> str:
+        base = self._api_base()
+        if self.protocol == "responses":
+            return f"{base}/responses"
         return f"{base}/chat/completions"
+
+    def _models_endpoint(self) -> str:
+        return f"{self._api_base()}/models"
 
     def _headers(self) -> dict[str, str]:
         headers = {
@@ -105,8 +154,9 @@ class LlmClient:
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> str:
+        mime = sniff_image_mime(image_png)
         b64 = base64.b64encode(image_png).decode("ascii")
-        data_url = f"data:image/png;base64,{b64}"
+        data_url = f"data:{mime};base64,{b64}"
         model_name = model or self.profile.vision_model or self.profile.model
         temp = self.profile.temperature if temperature is None else temperature
         tokens = self.profile.max_tokens if max_tokens is None else max_tokens
@@ -167,6 +217,62 @@ class LlmClient:
             max_tokens=16,
             temperature=0,
         )
+
+    def list_models(self) -> list[str]:
+        """Fetch available model ids via the OpenAI-compatible /models API.
+
+        Raises the same LlmError subclasses as ``chat``.
+        """
+        timeout = httpx.Timeout(self.profile.timeout_s)
+        try:
+            with httpx.Client(timeout=timeout) as client:
+                resp = client.get(
+                    self._models_endpoint(),
+                    headers=self._headers(),
+                )
+        except httpx.TimeoutException as exc:
+            raise TimeoutError(f"Request timed out after {self.profile.timeout_s}s") from exc
+        except httpx.RequestError as exc:
+            raise ApiError(f"Network error: {exc}") from exc
+
+        if resp.status_code in (401, 403):
+            raise AuthError(f"Authentication failed ({resp.status_code}): {resp.text[:300]}")
+        if resp.status_code == 429:
+            raise RateLimitError(f"Rate limited: {resp.text[:300]}")
+        if resp.status_code >= 400:
+            raise ApiError(
+                f"API error {resp.status_code}: {resp.text[:500]}",
+                status_code=resp.status_code,
+            )
+
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise ApiError("Invalid JSON in models response") from exc
+
+        models = self._extract_model_ids(data)
+        if not models:
+            raise ApiError("Model list is empty or has an unexpected shape")
+        return models
+
+    @staticmethod
+    def _extract_model_ids(data: Any) -> list[str]:
+        """Parse OpenAI ({"data":[{"id":…}]}) and Ollama-ish ({"models":[{"name":…}]})."""
+        items: Any = []
+        if isinstance(data, dict):
+            items = data.get("data") or data.get("models") or []
+        elif isinstance(data, list):
+            items = data
+
+        ids: list[str] = []
+        for item in items:
+            if isinstance(item, dict):
+                mid = item.get("id") or item.get("name") or item.get("model")
+                if mid:
+                    ids.append(str(mid))
+            elif isinstance(item, str) and item.strip():
+                ids.append(item.strip())
+        return sorted(set(ids))
 
     def _build_responses_body(
         self,
@@ -286,7 +392,19 @@ class LlmClient:
         content = self._extract_text(data)
         if content is None:
             raise ApiError(f"Unexpected response shape: {str(data)[:300]}")
-        return content.strip()
+
+        # Preferred path: the prompt asks for <final_translation> tags, so
+        # anything outside them (chain-of-thought, meta commentary) is
+        # dropped by construction. Fallback: legacy tag-free replies, with
+        # <think>-style blocks stripped.
+        tagged = extract_tagged_final(content)
+        cleaned = strip_reasoning(tagged) if tagged else strip_reasoning(content)
+        if not cleaned:
+            raise ApiError(
+                "Model returned only reasoning/thinking with no final answer. "
+                "A non-reasoning model is recommended for translation."
+            )
+        return cleaned
 
     def _extract_text(self, data: Any) -> str | None:
         """Parse both Chat Completions and Responses response shapes."""

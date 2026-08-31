@@ -6,8 +6,11 @@
 - 源语言自动检测，目标语言可选，语种互换
 - 文本翻译 / 截图翻译 / 粘贴图片翻译
 - 图片模式可切换：**OCR**（tesseract）或 **Vision**（视觉模型）
+- **提取文字**：OCR 提取当前图片 / 新截图的文字到原文框并复制，不翻译
 - 已是目标语言时自动反向翻译
+- 可选：翻译完成后**自动复制**到剪贴板
 - 自定义补充提示词
+- 首次启动**服务商模板向导**；设置中可一键**拉取模型列表**（`/models`）下拉选择
 - 现代化深色 / 浅色主题（Catppuccin 风格 QSS）
 
 ## 平台后端
@@ -72,15 +75,16 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build-windows.ps1
 - Linux：`~/.config/ai-translator/config.json`（权限 `600`）
 - Windows：`%APPDATA%\ai-translator\config.json`
 
-首次启动会自动生成默认配置。在 **设置 → LLM 配置** 中填写：
+首次启动会自动生成默认配置，并弹出**服务商向导**：选择 OpenAI / DeepSeek / SiliconFlow / Kimi / 智谱 / 通义 / OpenRouter / Gemini / Ollama / LM Studio 模板，填入 API Key，点「获取模型」拉取真实模型列表后下拉选择，测试连接即可开始。之后可在 **设置 → LLM 配置** 中修改：
 
 | 字段 | 说明 |
 |------|------|
+| 服务商模板 | 选择后自动填入 Base URL、协议与推荐模型（可随时改回「自定义」） |
 | Base URL | 如 `https://api.openai.com/v1`、`https://api.deepseek.com/v1`、`http://127.0.0.1:11434/v1` |
 | API Key | Bearer Token（本地 Ollama 可留空） |
 | API 协议 | **Chat Completions**（`/chat/completions`，默认）或 **Responses**（`/responses`，部分中转站） |
-| 文本模型 | 如 `gpt-4o-mini`、`deepseek-chat`、`llama3.2` |
-| 视觉模型 | 支持图片的模型，如 `gpt-4o`、`llava` |
+| 文本模型 | 可手输，或点「获取模型」从服务方拉取列表后选择 |
+| 视觉模型 | 同上；需支持图片输入，如 `gpt-4o`、`llava` |
 
 > 中转站若只给 Responses 协议，把 API 协议切到 **Responses**，Base URL 仍填到 `/v1` 即可（会自动请求 `/v1/responses`）。
 
@@ -100,6 +104,7 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build-windows.ps1
 |------|--------|
 | 翻译 | `Ctrl+Return` |
 | 截图翻译 | `Ctrl+Shift+S` |
+| 提取文字 | `Ctrl+Shift+T` |
 | 粘贴图片 | `Ctrl+Shift+V` |
 | 交换语种 | `Ctrl+Shift+X` |
 | 复制结果 | `Ctrl+Shift+C` |
@@ -113,8 +118,10 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build-windows.ps1
    - Linux：`slurp` 框选，`grim` 截取
    - Windows：Qt 全屏遮罩拖拽框选（截图期间主窗口自动隐藏）
 3. 按当前模式：
-   - **OCR**：tesseract 识别 → 文本模型翻译
-   - **Vision**：图片直接发给视觉模型翻译
+   - **OCR**：tesseract 识别（小图自动 2x 放大提升识别率）→ 文本模型翻译
+   - **Vision**：图片降采样后直接发给视觉模型翻译
+
+> 只想要图里的文字？用 **提取文字**（`Ctrl+Shift+T`）：OCR 结果直接进原文框并复制，不调用翻译。
 
 ## 项目结构
 
@@ -155,6 +162,7 @@ pytest -q
 | OCR 报缺语言包 | Linux：`sudo pacman -S tesseract-data-eng tesseract-data-chi_sim`；Windows：UB-Mannheim 安装器勾选对应语言 |
 | OCR 找不到 tesseract | Windows：安装后将 `tesseract.exe` 目录加入 PATH |
 | 401 / 鉴权失败 | 检查 API Key 与 Base URL 是否匹配该服务商 |
+| 模型输出思维链/分析过程 | 客户端只提取 `<final_translation>` 标签内的结果，标签外内容自动丢弃；若模型连标签也不输出，建议更换非推理模型（如 `deepseek-chat`） |
 | Vision 报错 | 确认模型支持图像输入；或改用 OCR 模式 |
 
 ## 许可
