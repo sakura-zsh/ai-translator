@@ -10,7 +10,10 @@ requires-python = ">=3.11"
 # Single source of truth: app/__init__.py
 dynamic = ["version"]
 dependencies = [
-    "PySide6>=6.6",
+    # App uses QtCore/QtGui/QtWidgets/QtNetwork only — Essentials covers all.
+    # The full "PySide6" metapackage drags in Addons (WebEngine, 3D, …),
+    # which bloats pip installs and PyInstaller builds by ~1 GB.
+    "PySide6-Essentials>=6.6",
     "httpx>=0.27",
     "Pillow>=10.0",
 ]

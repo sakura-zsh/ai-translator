@@ -7,10 +7,16 @@ $Root = Split-Path -Parent (Split-Path -Parent $WinDir)
 
 Write-Host "==> Installing project dependencies and PyInstaller"
 python -m pip install -r (Join-Path $Root "requirements.txt")
-python -m pip install --upgrade pyinstaller
+# No --upgrade: a forced upgrade hits the network on every build.
+python -m pip install pyinstaller
 
-Write-Host "==> Building"
-python -m PyInstaller --noconfirm --clean `
+Write-Host ""
+Write-Host "==> Building (first build takes 5-15 minutes; later builds are faster)"
+Write-Host "    Analysis + collecting Qt DLLs is the slow part. Don't close the window."
+# No --clean: keeps PyInstaller's dependency-analysis cache, which makes
+# rebuilds significantly faster. Delete packaging\windows\build manually
+# if you ever need a fully cold build.
+python -m PyInstaller --noconfirm `
   --distpath (Join-Path $WinDir "dist") `
   --workpath (Join-Path $WinDir "build") `
   (Join-Path $WinDir "ai-translator.spec")

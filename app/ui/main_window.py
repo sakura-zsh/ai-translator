@@ -261,6 +261,7 @@ class MainWindow(QMainWindow):
         # Floating history panel (child of central widget — not a system window)
         self.history_panel = HistoryPanel(central)
         self.history_panel.entry_selected.connect(self._on_history_selected)
+        self.history_panel.copy_requested.connect(self._on_history_copy)
         self.history_panel.clear_requested.connect(self._clear_history)
         QApplication.instance().installEventFilter(self)  # type: ignore[union-attr]
 
@@ -617,6 +618,17 @@ class MainWindow(QMainWindow):
             self._set_status("历史记录不存在")
             return
         self._restore_history(entry)
+
+    def _on_history_copy(self, entry_id: str) -> None:
+        """Copy a history entry's result to the clipboard; keep the panel open."""
+        entry = self.config.get_history(entry_id)
+        if entry is None:
+            self._set_status("历史记录不存在")
+            return
+        if self._copy_text_to_clipboard(entry.result_text or ""):
+            self._set_status("已复制历史译文")
+        else:
+            self._set_status("复制失败")
 
     def _restore_history(self, entry: HistoryEntry) -> None:
         s_idx = self.source_combo.findData(entry.source_lang)

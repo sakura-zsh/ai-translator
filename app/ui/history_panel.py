@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -32,6 +33,7 @@ class HistoryCard(QFrame):
     """One history entry: meta + source + result."""
 
     activated = Signal(str)  # entry id
+    copy_requested = Signal(str)  # entry id
 
     def __init__(self, entry: HistoryEntry, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -57,6 +59,15 @@ class HistoryCard(QFrame):
         title = QLabel(f"{when}  ·  {src} → {dst}  ·  {mode}")
         title.setObjectName("historyMeta")
         meta.addWidget(title, 1)
+        self.btn_copy = QPushButton("复制")
+        self.btn_copy.setObjectName("historyMiniButton")
+        self.btn_copy.setToolTip("复制译文到剪贴板")
+        # QPushButton consumes its own mouse events, so this click will not
+        # bubble up to HistoryCard.mouseReleaseEvent (no card activation).
+        self.btn_copy.clicked.connect(
+            lambda _=False: self.copy_requested.emit(self.entry_id)
+        )
+        meta.addWidget(self.btn_copy)
         root.addLayout(meta)
 
         src_label = QLabel("原文")
@@ -95,6 +106,7 @@ class HistoryPanel(QFrame):
     """Overlay panel anchored under the history button (not a top-level window)."""
 
     entry_selected = Signal(str)
+    copy_requested = Signal(str)  # entry id
     clear_requested = Signal()
     closed = Signal()
 
@@ -103,6 +115,7 @@ class HistoryPanel(QFrame):
         self.setObjectName("historyPanel")
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._all_entries: list[HistoryEntry] = []
         self.hide()
 
         root = QVBoxLayout(self)
@@ -122,6 +135,12 @@ class HistoryPanel(QFrame):
         header.addWidget(self.btn_clear)
         header.addWidget(self.btn_close)
         root.addLayout(header)
+
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("搜索原文或译文…")
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.textChanged.connect(self._apply_filter)
+        root.addWidget(self.search_edit)
 
         self.empty_label = QLabel("暂无翻译记录")
         self.empty_label.setObjectName("hintLabel")
@@ -148,30 +167,56 @@ class HistoryPanel(QFrame):
         hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.addWidget(hint)
 
-        # ~2 cards visible: card ~150–170px + gaps
+        # ~2 cards visible + search row: card ~150–170px + gaps
         self.setFixedWidth(380)
-        self.setFixedHeight(390)
+        self.setFixedHeight(430)
 
     def set_entries(self, entries: list[HistoryEntry]) -> None:
+        """Replace the full entry list, then re-apply the active filter."""
+        self._all_entries = list(entries)
+        self._apply_filter(self.search_edit.text())
+
+    def _apply_filter(self, pattern: str) -> None:
+        needle = (pattern or "").strip().lower()
+        if needle:
+            shown = [
+                e
+                for e in self._all_entries
+                if needle in (e.source_text or "").lower()
+                or needle in (e.result_text or "").lower()
+            ]
+        else:
+            shown = self._all_entries
+        self._render(shown)
+
+    def _render(self, entries: list[HistoryEntry]) -> None:
         while self.list_layout.count() > 1:
             item = self.list_layout.takeAt(0)
             w = item.widget()
             if w is not None:
                 w.deleteLater()
 
-        if not entries:
+        if not self._all_entries:
+            self.empty_label.setText("暂无翻译记录")
             self.empty_label.setVisible(True)
             self.scroll.setVisible(False)
             self.btn_clear.setEnabled(False)
             return
 
+        self.btn_clear.setEnabled(True)
+        if not entries:
+            self.empty_label.setText("无匹配记录")
+            self.empty_label.setVisible(True)
+            self.scroll.setVisible(False)
+            return
+
         self.empty_label.setVisible(False)
         self.scroll.setVisible(True)
-        self.btn_clear.setEnabled(True)
 
         for entry in entries:
             card = HistoryCard(entry, self.list_host)
             card.activated.connect(self._on_card)
+            card.copy_requested.connect(self.copy_requested)
             # insert before trailing stretch
             self.list_layout.insertWidget(self.list_layout.count() - 1, card)
 

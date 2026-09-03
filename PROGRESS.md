@@ -9,8 +9,10 @@
 ✅ 设置→翻译页：「翻译场景」下拉 + 缩小的补充提示词（56–96px）+ **术语表编辑器**（`parse_glossary`/`format_glossary` 在 presets.py，每行一条，分隔符 = / → / -> / Tab，最早出现者切分，上限 100）+ **Tesseract 路径** QLineEdit。
 ✅ 设置→外观页：**close_to_tray** QCheckBox + **历史条数** QSpinBox(0..100)，缩小时同步截断内存 history；对话框最小高度 566→620。
 ✅ 托盘退出修复：窗口隐藏时托盘「退出」无效——`quitOnLastWindowClosed` 只对可见窗口的 close 反应；`_quit()` 现在在 close() 后显式 `QApplication.quit()`。
-✅ 新增测试：tests/test_ipc.py 4 个 + 集成测试 11 个（场景 roundtrip、提示词紧凑、summon 显隐、隐藏态 _quit 持久化、glossary 解析/roundtrip/上限、术语表+tesseract 控件 roundtrip、close_to_tray 控件、历史条数截断）。
-⬜️ 剩余：§3.4 历史面板增强 → §3.5 TaskRunner 抽取 → §3.6 测试补齐 → §3.7 CI → §3.8 收尾（README/打包）。
+✅ 新增测试：tests/test_ipc.py 4 个 + 集成测试 14 个（场景 roundtrip、提示词紧凑、summon 显隐、隐藏态 _quit 持久化、glossary 解析/roundtrip/上限、术语表+tesseract 控件 roundtrip、close_to_tray 控件、历史条数截断、历史搜索过滤、卡片复制信号分离、历史译文复制）。
+✅ §3.4 历史面板增强（2026-09-03，127 测试全过）：HistoryPanel 顶部搜索框（textChanged → source_text+result_text 不区分大小写子串过滤，实时重渲染；`_all_entries` 缓存全量，清空搜索框恢复；无匹配显示「无匹配记录」）；HistoryCard meta 行加「复制」按钮 → `copy_requested(entry_id)` → 面板转发 → MainWindow `_on_history_copy`（复制译文到剪贴板 + 状态栏提示，面板不关闭；按钮点击不触发卡片激活）。面板高度 390→430 容纳搜索行。
+⬜️ 剩余：§3.5 TaskRunner 抽取 → §3.6 测试补齐 → §3.7 CI → §3.8 收尾（README/打包）。
+✅ Windows 打包瘦身（2026-09-03）：① pyproject 依赖 `PySide6` → `PySide6-Essentials>=6.6`（代码只用 Core/Gui/Widgets/Network，已 grep 确认；省掉 Addons 的 WebEngine/3D 等 ~1GB）；② spec excludes 全部未用 PySide6 子模块 + tkinter；③ build-windows.ps1 去掉 `--clean`（保留 PyInstaller 依赖分析缓存，重建显著加速）和 `pip install --upgrade`（免每次联网检查）。注：PySide6 应用首次打包 5–15 分钟属正常，非卡死。Windows 端打包待实测。
 ⚠️ 升级注意：旧版本实例持有锁且无 IPC，升级后需先彻底退出旧实例（Ctrl+Q 或托盘退出），否则第二实例会提示"暂时无法通知"。
 
 ---

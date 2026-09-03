@@ -271,6 +271,77 @@ def test_summon_keeps_visible_window_visible(window: MainWindow) -> None:
     assert window.isVisible()
 
 
+# ── History panel: search filter + per-card copy (§3.4) ────────────
+def _push_entries(config: AppConfig, n: int) -> None:
+    for i in range(n):
+        config.push_history(
+            source_lang="auto",
+            target_lang="zh",
+            mode="text",
+            source_text=f"hello world {i}",
+            result_text=f"你好世界 {i}",
+        )
+
+
+def test_history_search_filters_cards(window: MainWindow) -> None:
+    panel = window.history_panel
+    _push_entries(window.config, 3)
+    panel.set_entries(window.config.history)
+    assert panel.list_layout.count() - 1 == 3  # minus trailing stretch
+
+    panel.search_edit.setText("world 1")
+    # Filtering is live: 1 matching card remains.
+    assert panel.list_layout.count() - 1 == 1
+
+    # Matches the result text too, case-insensitively.
+    panel.search_edit.setText("你好世界")
+    assert panel.list_layout.count() - 1 == 3
+
+    # No match at all → empty hint, no cards.
+    panel.search_edit.setText("no such needle")
+    assert panel.list_layout.count() - 1 == 0
+    assert panel.empty_label.isVisibleTo(panel) or not panel.scroll.isVisible()
+
+    # Clearing the box restores the full list.
+    panel.search_edit.setText("")
+    assert panel.list_layout.count() - 1 == 3
+
+
+def test_history_card_copy_button_emits_entry_id(window: MainWindow) -> None:
+    panel = window.history_panel
+    _push_entries(window.config, 2)
+    panel.set_entries(window.config.history)
+
+    copied: list[str] = []
+    activated: list[str] = []
+    panel.copy_requested.connect(copied.append)
+    card = panel.list_layout.itemAt(0).widget()
+    card.activated.connect(activated.append)
+    card.btn_copy.click()
+
+    assert copied == [card.entry_id]
+    # The button click must not bubble up to card activation.
+    assert activated == []
+
+
+def test_main_window_history_copy_uses_clipboard(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _push_entries(window.config, 1)
+    entry = window.config.history[0]
+
+    copied: list[str] = []
+    monkeypatch.setattr(
+        window, "_copy_text_to_clipboard", lambda text: copied.append(text) or True
+    )
+    window._on_history_copy(entry.id)
+    assert copied == [entry.result_text]
+    assert window.status_label.text().startswith("已复制")
+
+    window._on_history_copy("no-such-id")
+    assert window.status_label.text() == "历史记录不存在"
+
+
 # ── Force quit from tray (window hidden) ───────────────────────────
 def test_quit_on_hidden_window_still_persists(
     window: MainWindow, tmp_path: Path
