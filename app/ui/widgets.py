@@ -8,7 +8,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QBuffer, QByteArray, QThreadPool, Signal
+from PySide6.QtCore import QThreadPool, Signal
 from PySide6.QtGui import QImage, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -23,7 +23,11 @@ from PySide6.QtWidgets import (
 )
 
 from app.core.llm_client import LlmClient
+from app.core.qtimage import qimage_to_png_bytes
 from app.workers.tasks import FunctionWorker
+
+# Re-exported: main_window and older code paths import it from here.
+__all__ = ["qimage_to_png_bytes", "apply_theme", "load_theme", "ModelSelector", "SourceEdit"]
 
 # Reasoning models are slow and tend to leak chain-of-thought into the
 # answer — warn when the user picks one for translation.
@@ -46,17 +50,6 @@ def load_theme(theme: str) -> str:
 def apply_theme(app: QApplication, theme: str) -> None:
     app.setStyle("Fusion")
     app.setStyleSheet(load_theme(theme))
-
-
-def qimage_to_png_bytes(image: QImage) -> bytes | None:
-    if image.isNull():
-        return None
-    qba = QByteArray()
-    qbuf = QBuffer(qba)
-    qbuf.open(QBuffer.OpenModeFlag.WriteOnly)
-    if not image.save(qbuf, "PNG"):
-        return None
-    return bytes(qba)
 
 
 class ModelSelector(QWidget):
@@ -221,10 +214,9 @@ class SourceEdit(QPlainTextEdit):
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
         # Prefer image paste when clipboard holds an image
-        if event.matches(QKeySequence.StandardKey.Paste):
-            if self._try_clipboard_image():
-                event.accept()
-                return
+        if event.matches(QKeySequence.StandardKey.Paste) and self._try_clipboard_image():
+            event.accept()
+            return
         super().keyPressEvent(event)
 
     def dragEnterEvent(self, event) -> None:  # noqa: N802

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import shutil
 import subprocess
 import sys
@@ -9,6 +10,8 @@ import tempfile
 from pathlib import Path
 
 from app.core.imaging import prepare_for_ocr
+
+log = logging.getLogger(__name__)
 
 
 class OcrError(Exception):
@@ -65,12 +68,15 @@ class OcrService:
                     check=False,
                 )
             except subprocess.TimeoutExpired as exc:
+                log.warning("tesseract timed out after %ss", self.timeout_s)
                 raise OcrError("OCR timed out") from exc
             except OSError as exc:
+                log.warning("failed to run tesseract: %s", exc)
                 raise OcrError(f"Failed to run tesseract: {exc}") from exc
 
             if proc.returncode != 0:
                 err = (proc.stderr or b"").decode("utf-8", errors="replace")
+                log.warning("tesseract failed (rc=%d): %s", proc.returncode, err[:200])
                 if "Error opening data file" in err or "Failed loading language" in err:
                     raise OcrError(
                         f"Missing tesseract language data for '{langs}'. "

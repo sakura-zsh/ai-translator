@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import io
 import shutil
 import subprocess
 
-from PIL import Image
-
 from app.core.clipboard_image import ClipboardImageError
+from app.core.imaging import normalize_to_png
 
 
 class ClipboardImageService:
@@ -68,7 +66,7 @@ class ClipboardImageService:
             try:
                 raw = self._paste_type(mime)
                 if raw:
-                    return self._to_png(raw)
+                    return normalize_to_png(raw)
             except Exception as exc:  # noqa: BLE001 — try next mime
                 last_err = exc
                 continue
@@ -91,15 +89,3 @@ class ClipboardImageService:
             err = (proc.stderr or b"").decode("utf-8", errors="replace")[:200]
             raise ClipboardImageError(f"No data for {mime}: {err}")
         return proc.stdout
-
-    @staticmethod
-    def _to_png(raw: bytes) -> bytes:
-        try:
-            with Image.open(io.BytesIO(raw)) as img:
-                if img.mode not in ("RGB", "RGBA"):
-                    img = img.convert("RGBA")
-                buf = io.BytesIO()
-                img.save(buf, format="PNG")
-                return buf.getvalue()
-        except Exception as exc:  # PIL.UnidentifiedImageError etc.
-            raise ClipboardImageError(f"Invalid image data: {exc}") from exc

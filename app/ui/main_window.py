@@ -2,16 +2,26 @@
 
 from __future__ import annotations
 
+import logging
 import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime
 from typing import Any
 
-from datetime import datetime
-
 from PySide6.QtCore import QByteArray, QEvent, QPoint, Qt, QThreadPool
-from PySide6.QtGui import QAction, QImage, QKeySequence, QPixmap, QShortcut
+from PySide6.QtGui import (
+    QAction,
+    QColor,
+    QFont,
+    QIcon,
+    QImage,
+    QKeySequence,
+    QPainter,
+    QPixmap,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -20,6 +30,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -27,6 +38,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSplitter,
     QStatusBar,
+    QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
 )
@@ -35,7 +47,9 @@ from app.config.schema import AppConfig, HistoryEntry
 from app.config.store import ConfigStore
 from app.core.clipboard_image import ClipboardImageError, ClipboardImageService
 from app.core.languages import SOURCE_LANGUAGES, TARGET_LANGUAGES
-from app.core.ocr import install_hint
+from app.core.ocr import OcrService, install_hint
+from app.core.presets import SCENE_PRESETS, effective_extra_prompt, get_scene
+from app.core.qtimage import qimage_to_png_bytes
 from app.core.screenshot import (
     ScreenshotCancelled,
     ScreenshotError,
@@ -47,13 +61,17 @@ from app.ui.settings_dialog import SettingsDialog
 from app.ui.widgets import SourceEdit, apply_theme
 from app.workers.tasks import FunctionWorker
 
+log = logging.getLogger(__name__)
+
 
 class MainWindow(QMainWindow):
     def __init__(self, store: ConfigStore, config: AppConfig) -> None:
         super().__init__()
         self.store = store
         self.config = config
-        self.translator = Translator()
+        self._force_quit = False
+        self._tray: QSystemTrayIcon | None = None
+        self._rebuild_translator()
         self.screenshot = ScreenshotService()
         self.clipboard_image = ClipboardImageService()
         self.pool = QThreadPool.globalInstance()
@@ -64,12 +82,27 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle("AI Translator")
         self.resize(config.ui.window_width, config.ui.window_height)
+        if config.ui.window_maximized:
+            self.setWindowState(Qt.WindowState.WindowMaximized)
 
         self._build_ui()
+        self._restore_splitter()
         self._reload_profiles()
         self._apply_translation_defaults()
+        self._setup_tray()
         self._install_hotkeys()
         self._set_status("就绪")
+
+    # ── Translator lifecycle ─────────────────────────────────────
+    def _rebuild_translator(self) -> None:
+        """(Re)build the translator with the configured tesseract binary."""
+        tesseract_bin = self.config.translation.tesseract_path or "tesseract"
+        self.translator = Translator(ocr=OcrService(tesseract_bin=tesseract_bin))
+
+    def _restore_splitter(self) -> None:
+        sizes = self.config.ui.splitter_sizes
+        if len(sizes) == 2 and sum(sizes) > 0:
+            self.splitter.setSizes(sizes)
 
     # ── UI construction ───────────────────────────────────────────
     def _build_ui(self) -> None:
@@ -101,10 +134,19 @@ class MainWindow(QMainWindow):
         self.mode_group.addButton(self.mode_vision)
         top.addWidget(self.mode_ocr)
         top.addWidget(self.mode_vision)
+
+        top.addSpacing(8)
+        top.addWidget(QLabel("场景"))
+        self.scene_combo = QComboBox()
+        for preset in SCENE_PRESETS:
+            self.scene_combo.addItem(preset.label, preset.id)
+        self.scene_combo.setToolTip("翻译风格预设（设置的「翻译」页也可修改，与补充提示词叠加生效）")
+        self.scene_combo.currentIndexChanged.connect(self._on_scene_changed)
+        top.addWidget(self.scene_combo)
         top.addStretch(1)
 
         self.btn_history = QPushButton("历史记录")
-        self.btn_history.setToolTip("最近 10 条翻译记录")
+        self.btn_history.setToolTip("翻译历史记录（条数可在设置中调整）")
         self.btn_history.clicked.connect(self._toggle_history_panel)
         top.addWidget(self.btn_history)
         root.addLayout(top)
@@ -150,6 +192,7 @@ class MainWindow(QMainWindow):
 
         # Source / result panes
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.splitter = splitter
         src_wrap = QFrame()
         src_wrap.setObjectName("card")
         src_l = QVBoxLayout(src_wrap)
@@ -223,8 +266,94 @@ class MainWindow(QMainWindow):
 
         quit_act = QAction("退出", self)
         quit_act.setShortcut(QKeySequence.StandardKey.Quit)
-        quit_act.triggered.connect(self.close)
+        quit_act.triggered.connect(self._quit)
         self.addAction(quit_act)
+
+    # ── System tray ───────────────────────────────────────────────
+    def _setup_tray(self) -> None:
+        """Create the tray icon when the desktop environment supports it.
+
+        Some Wayland compositors expose no StatusNotifierItem host — in that
+        case QSystemTrayIcon.isSystemTrayAvailable() is False and we simply
+        degrade to normal window-close behaviour.
+        """
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            log.info("System tray unavailable; running without tray icon")
+            return
+        menu = QMenu()
+        act_toggle = QAction("显示 / 隐藏", menu)
+        act_toggle.triggered.connect(self._toggle_visible)
+        menu.addAction(act_toggle)
+        menu.addSeparator()
+        for label, slot in (
+            ("截图翻译", self._on_screenshot),
+            ("提取文字", self._on_extract_text),
+            ("粘贴图片翻译", self._on_paste_image),
+        ):
+            act = QAction(label, menu)
+            act.triggered.connect(slot)
+            menu.addAction(act)
+        menu.addSeparator()
+        act_quit = QAction("退出", menu)
+        act_quit.triggered.connect(self._quit)
+        menu.addAction(act_quit)
+
+        tray = QSystemTrayIcon(self._make_tray_icon(), self)
+        tray.setContextMenu(menu)
+        tray.setToolTip("AI Translator")
+        tray.activated.connect(self._on_tray_activated)
+        tray.show()
+        self._tray = tray
+
+    @staticmethod
+    def _make_tray_icon() -> QIcon:
+        """Programmatically drawn icon: rounded blue square + 「译」."""
+        pix = QPixmap(64, 64)
+        pix.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pix)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor("#3b82f6"))
+            painter.drawRoundedRect(0, 0, 64, 64, 14, 14)
+            font = QFont()
+            font.setPixelSize(36)
+            font.setBold(True)
+            painter.setFont(font)
+            painter.setPen(QColor("#ffffff"))
+            painter.drawText(pix.rect(), Qt.AlignmentFlag.AlignCenter, "译")
+        finally:
+            painter.end()
+        return QIcon(pix)
+
+    def _toggle_visible(self) -> None:
+        if self.isVisible() and not self.isMinimized():
+            self.hide()
+        else:
+            self.show()
+            self.raise_()
+            self.activateWindow()
+
+    def summon(self) -> None:
+        """Show + raise + focus the window (single-instance activate)."""
+        if self.isMinimized():
+            self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            self._toggle_visible()
+
+    def _quit(self) -> None:
+        """Force a real quit (bypasses close-to-tray)."""
+        self._force_quit = True
+        self.close()
+        # quitOnLastWindowClosed only reacts to *visible* windows being
+        # closed — with the window parked in the tray, close() alone would
+        # not end the event loop, so quit explicitly.
+        QApplication.quit()
 
     # ── Config helpers ────────────────────────────────────────────
     def _reload_profiles(self) -> None:
@@ -248,6 +377,8 @@ class MainWindow(QMainWindow):
             self.mode_vision.setChecked(True)
         else:
             self.mode_ocr.setChecked(True)
+        scene_idx = self.scene_combo.findData(t.scene)
+        self.scene_combo.setCurrentIndex(max(0, scene_idx))
         self._update_swap_enabled()
 
     def _persist(self) -> None:
@@ -258,6 +389,8 @@ class MainWindow(QMainWindow):
         self.config.translation.image_mode = "vision" if self.mode_vision.isChecked() else "ocr"
         self.config.ui.window_width = self.width()
         self.config.ui.window_height = self.height()
+        self.config.ui.window_maximized = self.isMaximized()
+        self.config.ui.splitter_sizes = list(self.splitter.sizes())
 
     def _save_config(self) -> bool:
         """Write config to disk; surface failures instead of raising."""
@@ -276,6 +409,13 @@ class MainWindow(QMainWindow):
             profile = self.config.get_active_profile()
             self._set_status(f"已切换配置：{profile.name} · {profile.model}")
 
+    def _on_scene_changed(self, _index: int) -> None:
+        sid = self.scene_combo.currentData()
+        if sid and sid != self.config.translation.scene:
+            self.config.translation.scene = sid
+            self._save_config()
+            self._set_status(f"场景：{get_scene(sid).label}")
+
     def _open_settings(self) -> None:
         self._persist()
         self._save_config()
@@ -291,6 +431,7 @@ class MainWindow(QMainWindow):
         """Adopt an externally-updated config (settings dialog / wizard)."""
         self.config = config
         apply_theme(QApplication.instance(), self.config.ui.theme)  # type: ignore[arg-type]
+        self._rebuild_translator()
         self._reload_profiles()
         self._apply_translation_defaults()
         self._install_hotkeys()
@@ -352,6 +493,7 @@ class MainWindow(QMainWindow):
             self.btn_paste_img,
             self.btn_settings,
             self.profile_combo,
+            self.scene_combo,
         ):
             w.setEnabled(not busy)
         if message:
@@ -377,7 +519,8 @@ class MainWindow(QMainWindow):
         profile = self.config.get_active_profile()
         source = self.source_combo.currentData() or "auto"
         target = self.target_combo.currentData() or "zh"
-        extra = self.config.translation.supplementary_prompt
+        extra = effective_extra_prompt(self.config.translation)
+        glossary = self.config.translation.glossary or None
 
         self._set_busy(True, f"翻译中… · {profile.model}")
         started = time.perf_counter()
@@ -389,6 +532,7 @@ class MainWindow(QMainWindow):
                 target_lang=target,
                 profile=profile,
                 supplementary_prompt=extra,
+                glossary=glossary,
             )
             return {"result": result, "elapsed": time.perf_counter() - started}
 
@@ -410,9 +554,12 @@ class MainWindow(QMainWindow):
             self.source_edit.setPlainText(result.ocr_text)
 
         copied = ""
-        if self.config.translation.auto_copy_result and result.text.strip():
-            if self._copy_text_to_clipboard(result.text):
-                copied = " · 已复制到剪贴板"
+        if (
+            self.config.translation.auto_copy_result
+            and result.text.strip()
+            and self._copy_text_to_clipboard(result.text)
+        ):
+            copied = " · 已复制到剪贴板"
 
         source_text = self.source_edit.toPlainText().strip()
         if not source_text:
@@ -564,7 +711,8 @@ class MainWindow(QMainWindow):
         profile = self.config.get_active_profile()
         source = self.source_combo.currentData() or "auto"
         target = self.target_combo.currentData() or "zh"
-        extra = self.config.translation.supplementary_prompt
+        extra = effective_extra_prompt(self.config.translation)
+        glossary = self.config.translation.glossary or None
         mode = self._image_mode()
         ocr_langs = self.config.translation.ocr_langs
 
@@ -588,6 +736,7 @@ class MainWindow(QMainWindow):
                 target_lang=target,
                 profile=profile,
                 supplementary_prompt=extra,
+                glossary=glossary,
                 ocr_langs=ocr_langs,
             )
             return {"result": result, "elapsed": time.perf_counter() - started}
@@ -735,6 +884,7 @@ class MainWindow(QMainWindow):
 
     def _on_extract_err(self, exc: object) -> None:
         self._set_busy(False)
+        log.error("extract text failed", exc_info=exc)  # type: ignore[arg-type]
         message = str(exc)
         self._set_status(f"提取文字失败：{message}")
         QMessageBox.warning(self, "提取文字失败", message)
@@ -756,8 +906,6 @@ class MainWindow(QMainWindow):
         if md.hasImage():
             img = md.imageData()
             if isinstance(img, QImage) and not img.isNull():
-                from app.ui.widgets import qimage_to_png_bytes
-
                 return qimage_to_png_bytes(img)
         for fmt in ("image/png", "image/jpeg", "image/webp", "image/bmp", "image/gif"):
             if md.hasFormat(fmt):
@@ -765,8 +913,6 @@ class MainWindow(QMainWindow):
                 if raw:
                     qimg = QImage.fromData(raw)
                     if not qimg.isNull():
-                        from app.ui.widgets import qimage_to_png_bytes
-
                         return qimage_to_png_bytes(qimg) or raw
         return None
 
@@ -846,6 +992,16 @@ class MainWindow(QMainWindow):
 
     # ── Lifecycle ─────────────────────────────────────────────────
     def closeEvent(self, event) -> None:  # noqa: N802
+        # Close-to-tray: hide instead of quitting when the tray is available
+        # and the user opted in. A forced quit (tray menu / Ctrl+Q) skips this.
+        if (
+            self._tray is not None
+            and self.config.ui.close_to_tray
+            and not self._force_quit
+        ):
+            event.ignore()
+            self.hide()
+            return
         # Grace period for in-flight workers so their signals don't arrive
         # after teardown; queued-but-unstarted tasks are dropped.
         self.pool.clear()

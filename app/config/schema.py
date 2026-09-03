@@ -47,6 +47,10 @@ class TranslationConfig:
     supplementary_prompt: str = ""
     ocr_langs: str = "eng+chi_sim"
     auto_copy_result: bool = False
+    scene: str = "general"  # key into app.core.presets.SCENE_PRESETS
+    glossary: dict[str, str] = field(default_factory=dict)
+    # Absolute path to the tesseract binary; empty → look up in PATH.
+    tesseract_path: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> TranslationConfig:
@@ -56,6 +60,16 @@ class TranslationConfig:
         if mode not in ("ocr", "vision"):
             kwargs["image_mode"] = "ocr"
         kwargs["auto_copy_result"] = bool(kwargs.get("auto_copy_result", False))
+        kwargs["tesseract_path"] = str(kwargs.get("tesseract_path", "") or "")
+
+        glossary_raw = kwargs.get("glossary")
+        glossary: dict[str, str] = {}
+        if isinstance(glossary_raw, dict):
+            for term, translation in list(glossary_raw.items())[:100]:
+                term_s, trans_s = str(term).strip(), str(translation).strip()
+                if term_s and trans_s:
+                    glossary[term_s] = trans_s
+        kwargs["glossary"] = glossary
         return cls(**kwargs)
 
 
@@ -79,6 +93,9 @@ class UiConfig:
     theme: Literal["dark", "light"] = "dark"
     window_width: int = 920
     window_height: int = 640
+    window_maximized: bool = False
+    splitter_sizes: list[int] = field(default_factory=list)
+    close_to_tray: bool = True
     hotkeys: HotkeysConfig = field(default_factory=HotkeysConfig)
 
     @classmethod
@@ -88,13 +105,22 @@ class UiConfig:
         theme = kwargs.get("theme", "dark")
         if theme not in ("dark", "light"):
             kwargs["theme"] = "dark"
+        kwargs["window_maximized"] = bool(kwargs.get("window_maximized", False))
+        kwargs["close_to_tray"] = bool(kwargs.get("close_to_tray", True))
+        sizes_raw = kwargs.get("splitter_sizes")
+        kwargs["splitter_sizes"] = (
+            [int(s) for s in sizes_raw if isinstance(s, (int, float))]
+            if isinstance(sizes_raw, list)
+            else []
+        )
         hotkeys_data = data.get("hotkeys") or {}
         if isinstance(hotkeys_data, dict):
             kwargs["hotkeys"] = HotkeysConfig.from_dict(hotkeys_data)
         return cls(**kwargs)
 
 
-HISTORY_LIMIT = 10
+HISTORY_LIMIT_DEFAULT = 10
+HISTORY_LIMIT_MAX = 100
 _HISTORY_TEXT_MAX = 4000
 
 
@@ -124,6 +150,7 @@ class AppConfig:
     translation: TranslationConfig = field(default_factory=TranslationConfig)
     ui: UiConfig = field(default_factory=UiConfig)
     history: list[HistoryEntry] = field(default_factory=list)
+    history_limit: int = HISTORY_LIMIT_DEFAULT
 
     def __post_init__(self) -> None:
         if not self.profiles:
@@ -131,8 +158,9 @@ class AppConfig:
                 LlmProfile(id="default", name="OpenAI-compatible"),
             ]
             self.active_profile_id = "default"
-        if len(self.history) > HISTORY_LIMIT:
-            self.history = self.history[:HISTORY_LIMIT]
+        self.history_limit = max(0, min(int(self.history_limit), HISTORY_LIMIT_MAX))
+        if len(self.history) > self.history_limit:
+            self.history = self.history[: self.history_limit]
 
     @classmethod
     def default(cls) -> AppConfig:
@@ -166,15 +194,12 @@ class AppConfig:
         translation_raw = data.get("translation") or {}
         ui_raw = data.get("ui") or {}
         history_raw = data.get("history") or []
-        history = [
-            HistoryEntry.from_dict(h) for h in history_raw if isinstance(h, dict)
-        ][:HISTORY_LIMIT]
 
         active = data.get("active_profile_id") or profiles[0].id
         if not any(p.id == active for p in profiles):
             active = profiles[0].id
 
-        return cls(
+        cfg = cls(
             version=int(data.get("version", 1)),
             active_profile_id=active,
             profiles=profiles,
@@ -182,8 +207,13 @@ class AppConfig:
                 translation_raw if isinstance(translation_raw, dict) else {}
             ),
             ui=UiConfig.from_dict(ui_raw if isinstance(ui_raw, dict) else {}),
-            history=history,
+            history=[],
+            history_limit=int(data.get("history_limit", HISTORY_LIMIT_DEFAULT)),
         )
+        cfg.history = [
+            HistoryEntry.from_dict(h) for h in history_raw if isinstance(h, dict)
+        ][: cfg.history_limit]
+        return cfg
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -222,8 +252,8 @@ class AppConfig:
                 self.history[0] = entry
                 return entry
         self.history.insert(0, entry)
-        if len(self.history) > HISTORY_LIMIT:
-            self.history = self.history[:HISTORY_LIMIT]
+        if len(self.history) > self.history_limit:
+            self.history = self.history[: self.history_limit]
         return entry
 
     def clear_history(self) -> None:

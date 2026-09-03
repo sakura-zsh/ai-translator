@@ -81,6 +81,26 @@ def downscale_for_vision(
 
 
 
+def normalize_to_png(raw: bytes) -> bytes:
+    """Decode any image payload and re-encode it as PNG.
+
+    Downstream paths (OCR, vision, clipboard round-trips) all assume PNG, and
+    every backend used to carry its own near-identical copy of this logic.
+    Raises ``ValueError`` when ``raw`` is not a decodable image so callers can
+    wrap it into their own error type.
+    """
+    try:
+        with Image.open(io.BytesIO(raw)) as img:
+            img.load()
+            if img.mode not in ("RGB", "RGBA"):
+                img = img.convert("RGBA")
+            out = io.BytesIO()
+            img.save(out, format="PNG")
+            return out.getvalue()
+    except Exception as exc:  # PIL.UnidentifiedImageError, truncated input...
+        raise ValueError(f"Invalid image data: {exc}") from exc
+
+
 def prepare_for_ocr(
     png: bytes,
     *,

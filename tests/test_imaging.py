@@ -7,7 +7,12 @@ import io
 import pytest
 from PIL import Image
 
-from app.core.imaging import downscale_for_vision, prepare_for_ocr, sniff_image_mime
+from app.core.imaging import (
+    downscale_for_vision,
+    normalize_to_png,
+    prepare_for_ocr,
+    sniff_image_mime,
+)
 
 
 def _png_bytes(w: int, h: int, *, alpha: bool = False, noise: bool = False) -> bytes:
@@ -108,3 +113,38 @@ def test_ocr_upscale_capped_at_max_dim() -> None:
 def test_ocr_undecodable_unchanged() -> None:
     garbage = b"not an image at all"
     assert prepare_for_ocr(garbage) is garbage
+
+
+# ── normalize_to_png ──────────────────────────────────────────────
+def test_normalize_converts_foreign_format_to_png() -> None:
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8), (255, 0, 0)).save(buf, format="JPEG")
+    out = normalize_to_png(buf.getvalue())
+    assert sniff_image_mime(out) == "image/png"
+    with Image.open(io.BytesIO(out)) as img:
+        assert img.size == (8, 8)
+
+
+def test_normalize_preserves_alpha() -> None:
+    src = _png_bytes(8, 8, alpha=True)
+    out = normalize_to_png(src)
+    with Image.open(io.BytesIO(out)) as img:
+        assert img.mode == "RGBA"
+
+
+def test_normalize_is_idempotent_for_png() -> None:
+    src = _png_bytes(8, 8)
+    out = normalize_to_png(src)
+    with Image.open(io.BytesIO(out)) as img:
+        assert img.size == (8, 8)
+    assert sniff_image_mime(out) == "image/png"
+
+
+def test_normalize_rejects_garbage() -> None:
+    with pytest.raises(ValueError):
+        normalize_to_png(b"\x00\x01\x02 not an image")
+
+
+def test_normalize_rejects_empty_payload() -> None:
+    with pytest.raises(ValueError):
+        normalize_to_png(b"")

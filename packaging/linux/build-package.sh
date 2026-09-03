@@ -5,15 +5,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PKGDIR="$ROOT/packaging/linux"
 PKGNAME="ai-translator"
-PKGVER="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/pyproject.toml" | head -1)"
+# Version lives in app/__init__.py (single source of truth; pyproject reads
+# it via setuptools dynamic attr).
+PKGVER="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' "$ROOT/app/__init__.py" | head -1)"
 TARBALL="${PKGNAME}-${PKGVER}.tar.gz"
 
 if [[ -z "$PKGVER" ]]; then
-  echo "error: cannot read version from pyproject.toml" >&2
+  echo "error: cannot read version from app/__init__.py" >&2
   exit 1
 fi
 
-# Keep PKGBUILD version in sync with pyproject.toml
+# Keep PKGBUILD version in sync with app/__init__.py
 sed -i "s/^pkgver=.*/pkgver=${PKGVER}/" "$PKGDIR/PKGBUILD"
 
 echo "==> Preparing source tarball ${TARBALL}"

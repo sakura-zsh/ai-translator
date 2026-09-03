@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 import re
 from typing import Any
 
@@ -10,6 +11,8 @@ import httpx
 
 from app.config.schema import LlmProfile
 from app.core.imaging import sniff_image_mime
+
+log = logging.getLogger(__name__)
 
 # Reasoning models (DeepSeek-R1, QwQ, distills…) sometimes inline their
 # chain-of-thought in `content` inside tags — especially on relays / local
@@ -370,15 +373,20 @@ class LlmClient:
                     json=body,
                 )
         except httpx.TimeoutException as exc:
+            log.warning("chat request timed out after %ss", self.profile.timeout_s)
             raise TimeoutError(f"Request timed out after {self.profile.timeout_s}s") from exc
         except httpx.RequestError as exc:
+            log.warning("chat request network error: %s", exc)
             raise ApiError(f"Network error: {exc}") from exc
 
         if resp.status_code in (401, 403):
+            log.warning("auth failed (%d)", resp.status_code)
             raise AuthError(f"Authentication failed ({resp.status_code}): {resp.text[:300]}")
         if resp.status_code == 429:
+            log.warning("rate limited (429)")
             raise RateLimitError(f"Rate limited: {resp.text[:300]}")
         if resp.status_code >= 400:
+            log.warning("API error %d", resp.status_code)
             raise ApiError(
                 f"API error {resp.status_code}: {resp.text[:500]}",
                 status_code=resp.status_code,

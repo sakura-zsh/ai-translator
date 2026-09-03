@@ -1,0 +1,127 @@
+# 项目进度存档（AI Translator）
+
+> 最后更新：2026-09-03。本文件供跨会话恢复开发用，完成某项后请打勾并更新「当前状态」。
+
+## 一、当前状态一句话
+
+**§3.2 之后新增：单实例唤起（IPC）+ 场景进设置页 + 托盘退出修复 + §3.3 全部完成（124 测试全过，ruff 全绿）。**
+✅ 单实例唤起：`app/ipc.py`（ActivateServer/notify_running，QLocalServer socket "ai-translator-activate"）；第二实例启动 → 发送 "activate" 并退出 → 首实例 `MainWindow.summon()` 弹出/聚焦窗口。niri 等合成器快捷键绑定启动命令即可恢复"呼出"工作流，不依赖任何合成器。注意：GlobalShortcuts 门户在 niri/wlroots 系不可用（无后端），未采用。
+✅ 设置→翻译页：「翻译场景」下拉 + 缩小的补充提示词（56–96px）+ **术语表编辑器**（`parse_glossary`/`format_glossary` 在 presets.py，每行一条，分隔符 = / → / -> / Tab，最早出现者切分，上限 100）+ **Tesseract 路径** QLineEdit。
+✅ 设置→外观页：**close_to_tray** QCheckBox + **历史条数** QSpinBox(0..100)，缩小时同步截断内存 history；对话框最小高度 566→620。
+✅ 托盘退出修复：窗口隐藏时托盘「退出」无效——`quitOnLastWindowClosed` 只对可见窗口的 close 反应；`_quit()` 现在在 close() 后显式 `QApplication.quit()`。
+✅ 新增测试：tests/test_ipc.py 4 个 + 集成测试 11 个（场景 roundtrip、提示词紧凑、summon 显隐、隐藏态 _quit 持久化、glossary 解析/roundtrip/上限、术语表+tesseract 控件 roundtrip、close_to_tray 控件、历史条数截断）。
+⬜️ 剩余：§3.4 历史面板增强 → §3.5 TaskRunner 抽取 → §3.6 测试补齐 → §3.7 CI → §3.8 收尾（README/打包）。
+⚠️ 升级注意：旧版本实例持有锁且无 IPC，升级后需先彻底退出旧实例（Ctrl+Q 或托盘退出），否则第二实例会提示"暂时无法通知"。
+
+---
+
+## 二、已完成并验证的工作（勿重做）
+
+### Bug 修复（全部有回归测试）
+1. ✅ 首启动只读 FS 崩溃 → `store.load()` 首次写入 best-effort
+2. ✅ Wayland 文本粘贴空转 6 个子进程 → `clipboard_wayland.read_png()` 无 image/* 时快速失败
+3. ✅ Worker 错误信号改发异常对象 `Signal(object)`，UI 用 `isinstance(exc, ScreenshotCancelled)` 判断
+4. ✅ 退出竞态：`closeEvent` 先 `pool.clear()+waitForDone(2000)`；`_save_config()` 统一吞 OSError
+5. ✅ Vision 载荷降采样：`imaging.downscale_for_vision()`（长边>2000 必降采样，不透明转 JPEG），`chat_vision` 的 data URL 用 `sniff_image_mime` 跟随真实格式；OCR 路径保持原图
+6. ✅ wl-copy 假成功 → `check=True` 失败回落 Qt 剪贴板
+7. ✅ 思维链泄漏三层修复：`strip_reasoning()`（<think> 块剥离）+ 提示词硬化（禁止推理、纯命令原样返回）+ **`<final_translation>` 标签提取**（`extract_tagged_final()`，提示词要求模型包裹答案，客户端只取标签内；未闭合/无标签均有兜底）
+8. ✅ ModelSelector 布局挤压：状态行改为**常驻占位一行**（`setFixedHeight`，Ignored 水平策略），长文本进 tooltip；设置对话框最小高度 566
+9. ✅ 打包脚本自递归 22GB 事故：暂存目录改 `mktemp -d` + trap 清理、exclude 路径修正、50MB 保险丝（详见 git log 提交说明）
+10. ✅ 死代码清理（menu_label / build_user_text_message / status 信号 / 空 pass 块）
+
+### 新功能（v0.1.0 已含）
+- 自动复制译文开关（设置→翻译）
+- 服务商模板 10 家（`app/core/providers.py`）+ `LlmClient.list_models()`（`GET /models`，兼容 OpenAI/Ollama 两种响应）+ `ModelSelector` 组件（可编辑下拉+获取按钮+推理模型提醒 `_REASONING_MODEL_RE`）
+- 首启向导 `app/ui/first_run_dialog.py`（`config.needs_setup()` 触发，可跳过）
+- 提取文字模式（按钮+Ctrl+Shift+T；`imaging.prepare_for_ocr()` 小图 2x 放大）
+- OCR 预处理已接入 `OcrService.extract_text`
+
+### 工程基础（本轮 0.2.0 批次已完成部分）
+- ✅ **版本单源**：`app/__init__.py` `__version__ = "0.2.0"`；main.py 导入它；pyproject `dynamic = ["version"]` + `[tool.setuptools.dynamic] attr`；`build-package.sh` 改读 `app/__init__.py`（⚠️ PKGBUILD 的 pkgver 仍是 0.1.0，下次跑脚本自动同步）
+- ✅ `app/logsetup.py` 已创建（RotatingFileHandler，XDG_STATE_HOME/~/.local/state/ai-translator/，Windows %LOCALAPPDATA%/logs；main.py 已调用 `setup_logging()`）
+- ✅ `requirements.txt` → `-e .`（依赖唯一来源是 pyproject）
+- ✅ `.gitignore` 清理（移除失效的 src-staging 条目）
+- ✅ pyproject 新增：`[project.scripts] ai-translator-cli`、`[project.optional-dependencies] dev`、`[tool.ruff]`、`[tool.mypy]`（line-length 100，select E/F/W/I/UP/B/SIM，ignore E501，ui 目录豁免 N802）
+- ✅ **schema 扩展**（`app/config/schema.py`）：
+  - TranslationConfig：`scene: str = "general"`、`glossary: dict[str,str]`（from_dict 清洗 ≤100 项）、`tesseract_path: str = ""`
+  - UiConfig：`window_maximized: bool`、`splitter_sizes: list[int]`、`close_to_tray: bool = True`
+  - AppConfig：`history_limit: int = 10`（0..100 钳制）；原 `HISTORY_LIMIT` 常量改名 `HISTORY_LIMIT_DEFAULT`，新增 `HISTORY_LIMIT_MAX = 100`；push_history/from_dict/__post_init__ 均已改用实例字段
+- ✅ **场景预设** `app/core/presets.py`：5 个内置场景（general/academic/technical/casual/formal）、`get_scene()`、`scene_prompt()`、`effective_extra_prompt(config)`（预设+个人补充提示词合并）
+- ✅ **术语表注入**：`build_system_prompt(..., glossary=None)` 追加 "Glossary — always render these terms exactly as given"；`Translator.translate_text/translate_image` 已加 `glossary` 参数（默认 None，向后兼容）
+
+- ✅ **图片转换去重（原 Step 5，已完成）**：
+  - `imaging.normalize_to_png(raw)`：PIL 解码→RGB(A)→PNG，失败 `raise ValueError`（与 `downscale_for_vision` 的"不可解码原样返回"语义不同，调用方需自行兜底）
+  - 新建 `app/core/qtimage.py`：`qimage_to_png_bytes()`（Qt 编码优先，Pillow 兜底）；放在 core 是因为后端需要它而 core 不能 import ui
+  - `widgets.py` 改为 `from app.core.qtimage import qimage_to_png_bytes` 并加 `__all__` 显式 re-export；`main_window.py` 两处改为顶层导入 core 版本
+  - `clipboard_windows.py` 删私有 `_qimage_to_png`/`_to_png`；`clipboard_wayland.py` 删私有 `_to_png`；`screenshot_windows.py` 的 `_pixmap_to_png_bytes` 由 40 行缩到 3 行
+- ✅ **CLI 模式（`app/cli.py`，已完成）**：文本参数 / `--clipboard` / `--image` / `--screenshot` / stdin；`-s`/`-t`/`--mode`/`--profile`/`--no-copy`/`--no-notify`/`--verbose`/`--config`
+- ✅ **ruff 全绿**：`ruff check app tests` → All checks passed（修 2 处 I001、1 处 F401、5 处 SIM105、2 处 SIM108、2 处 SIM102）
+
+**✅ 测试状态：96 passed（基线 76 + 新增 20）。** ruff 全绿，offscreen GUI 冒烟全过（MainWindow / SettingsDialog / HistoryPanel / FirstRunDialog 均可构造）。
+
+---
+
+## 三、剩余工作清单（按建议实施顺序）
+
+### 3.2 主窗口接入新配置（✅ 已完成，见「一、当前状态」）
+- ✅ 工具栏「场景」QComboBox（SCENE_PRESETS，on change → `config.translation.scene` + `_save_config()`）；busy 时随其他控件一并禁用
+- ✅ 两条翻译路径 `extra = effective_extra_prompt(self.config.translation)`；translate_text/translate_image 均传 `glossary=self.config.translation.glossary or None`
+- ✅ `_rebuild_translator()`：`Translator(ocr=OcrService(tesseract_bin=config.translation.tesseract_path or "tesseract"))`；`__init__` 与 `reload_config()` 均调用
+- ✅ 窗口状态：`window_maximized` → `setWindowState(WindowMaximized)`；splitter 恢复/写回（len==2 且和>0 才用）
+- ✅ 单实例锁：`app/main.py` QLockFile(tempdir/"ai-translator.lock")，tryLock(0) 失败 → stderr + return 0；锁对象存活至进程结束
+- ✅ 单实例唤起（2026-09-03 追加）：`app/ipc.py` ActivateServer（QLocalServer）+ notify_running（QLocalSocket）；main.py 锁失败 → 通知首实例后退出；首实例 `command_received("activate")` → `MainWindow.summon()`（show+raise+activate，先清 minimized）；listen 前 `QLocalServer.removeServer` 清理崩溃残留；socket 不可用仅 log 降级
+- ✅ 设置页场景控件（2026-09-03 追加）：`settings_dialog._build_translation_tab` 新增 t_scene 下拉 + 补充提示词缩小（56–96px）置于其下；`_on_accept` scene=self.t_scene.currentData()
+- ✅ 托盘：QSystemTrayIcon + 程序化图标（64px 圆角蓝底白「译」）；菜单：显示/隐藏、截图翻译、提取文字、粘贴图片翻译、退出；单击切换窗口；`closeEvent` 托盘可用且 close_to_tray 且非强制退出 → hide；Ctrl+Q 与托盘「退出」走 `_quit()`（强制退出）；`isSystemTrayAvailable()` 为 False → 不创建、正常关闭
+- ✅ 日志：UI 三个 error handler 加 `log.error(..., exc_info=exc)`；`workers/tasks.py` worker 异常、`llm_client._request` 网络/HTTP 错误、`ocr.py` 失败分支均已加 log
+- ✅ 测试：`tests/test_main_window_integration.py`（场景切换/持久化/busy 禁用、translator 重建、splitter 恢复、settings 透传+场景 roundtrip、close-to-tray 降级、summon 显隐）；`tests/test_ipc.py`（socket 收发、无服务降级、陈旧 socket 恢复、空载荷忽略）
+
+### 3.3 设置对话框新控件（`app/ui/settings_dialog.py`）
+- 翻译页：术语表 QPlainTextEdit（每行一条，分隔符支持 `=`、`→`、`->`、Tab；解析函数可放 presets.py 或 dialog 内 `_parse_glossary()`；上限 100 条）；tesseract 路径 QLineEdit（placeholder "tesseract（留空用 PATH）"）
+- 外观页：`close_to_tray` QCheckBox「关闭时最小化到托盘」；历史条数 QSpinBox(0..100)（写 `config.history_limit`，在 `_on_accept` 里 `self._config.history_limit = ...`，注意 UiConfig 构造不含它）
+- `_on_accept` 的 TranslationConfig/UiConfig 构造补齐新字段（scene 不在设置页，保持原值传递；window_maximized/splitter_sizes 原值透传，别丢了）
+
+### 3.4 历史面板增强（`app/ui/history_panel.py`）
+- 顶部 QLineEdit 搜索框（objectName 建议历史搜索样式沿用 hintLabel），`textChanged` → 过滤（source_text+result_text 不区分大小写子串）后重新 `set_entries`
+- `set_entries` 前先存 `self._all_entries`；清空搜索框时全量显示
+- HistoryCard meta 行加「复制」小按钮 → 新信号 `copy_requested(str)`（entry_id）→ 面板转发 → MainWindow `_on_history_copy`：`_copy_text_to_clipboard(entry.result_text)` + 状态栏提示（面板不关闭）
+- HistoryPanel 构造后需 `refresh`（MainWindow 打开面板时已 set_entries ✓）
+
+### 3.5 TaskRunner 抽取（worker 样板去重，中等风险）
+- 现状：translate/image/extract/screenshot/test-connection 五处重复 `FunctionWorker + finished/error connect + busy 切换`
+- 方案：`app/workers/tasks.py` 加 `TaskRunner(QObject)`：`busy` 属性、`run(work, on_ok, on_err=None)`（内部 FunctionWorker + 信号转发，error 传异常对象）；MainWindow 持有实例，`_set_busy` 视觉部分留在窗口（runner.busy 改变时回调）
+- 可渐进：先新代码用，旧方法逐步迁移；UI 冒烟全绿才算完成
+
+### 3.6 测试补齐
+- 单元：glossary 注入 prompt 断言、`effective_extra_prompt` 组合、presets 兜底（未知 id → general）、schema 新字段 roundtrip（glossary 清洗、history_limit 钳制、splitter_sizes 类型过滤）、CLI argparse + 文本翻译路径（mock LlmClient）、normalize_to_png
+- `tests/test_ui_smoke.py`（新）：`pytest.importorskip("PySide6")`；session 级 QApplication fixture（`QT_QPA_PLATFORM=offscreen`）；QMessageBox.information/warning 打桩防模态阻塞；移植此前 /tmp 冒烟的关键断言：①ModelSelector 状态文字变化前后 height/combo height 不变 ②推理模型提醒文案切换 ③模板选择填充 base_url/model ④配置切换回写路径 ⑤提取文字 handler + 自动复制（patch shutil.which 禁用 wl-copy 走 Qt 剪贴板）⑥向导构建
+- 注意旧测试：`test_config.py::test_history_keeps_ten_newest` 仍应过（默认 limit=10）
+
+### 3.7 CI + Lint
+- `.github/workflows/ci.yml`：matrix 3.11/3.12/3.13；`pip install -e .[dev]`；apt 装 `libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3`（offscreen Qt 需要）；`QT_QPA_PLATFORM=offscreen ruff check app tests` + `QT_QPA_PLATFORM=offscreen pytest -q`；mypy 可加为 non-blocking（`continue-on-error: true` 先观察）
+- 本地先跑 `ruff check app tests` 修问题（预计有未用 import 等 F 类）；mypy 按需放行
+
+### 3.8 收尾
+- README：CLI 用法（niri/hyprland bind 示例）、托盘、场景、术语表、历史、新设置项、故障排查补「CLI」行
+- 全量验证：`pytest -q` → offscreen UI 冒烟 → `bash packaging/linux/build-package.sh`（应出 0.2.0 包）→ 用 `--schemas` 无所谓，重装 `sudo pacman -U` 实测一轮
+
+---
+
+## 四、验证命令速查
+
+```bash
+pip install --target /tmp/pylibs pytest            # 沙箱每次 /tmp 被清后重装
+PYTHONPATH=/tmp/pylibs python -m pytest -q         # 基线：中断前 76 passed
+# UI 冒烟需要 PySide6：pip install --target /tmp/pylibs PySide6（约 500MB，较慢）
+# 仓库内不要装任何东西！.testlibs 事故：665MB 曾被 rsync 卷进打包流程
+QT_QPA_PLATFORM=offscreen python -m app            # 冒烟跑 GUI
+bash packaging/linux/build-package.sh              # 产出 ai-translator-0.2.0-*.pkg.tar.zst
+```
+
+## 五、关键设计决策记录（避免重新讨论）
+
+- 标记提取用 XML 标签 `<final_translation>` 而非 emoji（译文可能含 emoji；模型复现 XML 更可靠；中转不碰 ASCII）
+- 场景预设与个人补充提示词**叠加生效**：preset 在前、personal 在后，settings 只编辑 personal
+- 术语表 prompt 注入上限 100 条；config 加载时清洗空项
+- 状态行常驻占位（防止布局跳动），超长文本走 tooltip
+- 托盘不可用（无 SNI 的 Wayland）→ 自动降级为普通关闭行为
+- CLI 不依赖 Qt（Linux），保证 headless/脚本场景可用

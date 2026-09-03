@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import io
-
-from PySide6.QtCore import QBuffer, QByteArray, QEventLoop, QPoint, QRect, Qt, Signal
+from PySide6.QtCore import QEventLoop, QPoint, QRect, Qt, Signal
 from PySide6.QtGui import QColor, QGuiApplication, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QWidget
 
+from app.core.qtimage import qimage_to_png_bytes
 from app.core.screenshot import ScreenshotCancelled, ScreenshotError
 
 
@@ -62,33 +61,10 @@ def _pixmap_to_png_bytes(pix: QPixmap) -> bytes:
     ):
         image = image.convertToFormat(QImage.Format.Format_RGBA8888)
 
-    qba = QByteArray()
-    buf = QBuffer(qba)
-    buf.open(QBuffer.OpenModeFlag.WriteOnly)
-    if not image.save(buf, "PNG"):
-        # Fallback via Pillow if Qt encoder fails
-        try:
-            from PIL import Image
-
-            if image.format() != QImage.Format.Format_RGBA8888:
-                image = image.convertToFormat(QImage.Format.Format_RGBA8888)
-            w, h = image.width(), image.height()
-            ptr = image.bits()
-            ptr.setsize(image.sizeInBytes())
-            raw = bytes(ptr)
-            # QImage may pad rows; use bytesPerLine
-            bpl = image.bytesPerLine()
-            if bpl == w * 4:
-                img = Image.frombytes("RGBA", (w, h), raw)
-            else:
-                rows = [raw[y * bpl : y * bpl + w * 4] for y in range(h)]
-                img = Image.frombytes("RGBA", (w, h), b"".join(rows))
-            out = io.BytesIO()
-            img.save(out, format="PNG")
-            return out.getvalue()
-        except Exception as exc:  # noqa: BLE001
-            raise ScreenshotError(f"Failed to encode PNG: {exc}") from exc
-    return bytes(qba)
+    encoded = qimage_to_png_bytes(image)
+    if not encoded:
+        raise ScreenshotError("Failed to encode PNG")
+    return encoded
 
 
 class _RegionSelector(QWidget):

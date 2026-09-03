@@ -11,7 +11,6 @@ from app.core.llm_client import LlmClient
 from app.core.ocr import OcrService
 from app.core.prompts import build_system_prompt
 
-
 ImageMode = Literal["ocr", "vision"]
 
 
@@ -35,6 +34,7 @@ class Translator:
         target_lang: str,
         profile: LlmProfile,
         supplementary_prompt: str = "",
+        glossary: dict[str, str] | None = None,
     ) -> TranslateResult:
         cleaned = (text or "").strip()
         if not cleaned:
@@ -45,6 +45,7 @@ class Translator:
             target_lang,
             supplementary_prompt,
             vision=False,
+            glossary=glossary,
         )
         client = LlmClient(profile)
         out = client.chat(
@@ -64,6 +65,7 @@ class Translator:
         target_lang: str,
         profile: LlmProfile,
         supplementary_prompt: str = "",
+        glossary: dict[str, str] | None = None,
         ocr_langs: str = "eng+chi_sim",
     ) -> TranslateResult:
         if not image_png:
@@ -77,6 +79,7 @@ class Translator:
                 target_lang=target_lang,
                 profile=profile,
                 supplementary_prompt=supplementary_prompt,
+                glossary=glossary,
             )
             result.ocr_text = ocr_text
             result.mode = "ocr"
@@ -89,6 +92,7 @@ class Translator:
             target_lang,
             supplementary_prompt,
             vision=True,
+            glossary=glossary,
         )
         client = LlmClient(profile)
         model = profile.vision_model or profile.model

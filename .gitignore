@@ -10,7 +10,6 @@ build/
 *.log
 packaging/linux/src/
 packaging/linux/pkg/
-packaging/linux/src-staging/
 packaging/linux/*.tar.gz
 packaging/linux/*.pkg.tar.*
 packaging/*/build/

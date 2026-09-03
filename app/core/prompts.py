@@ -11,6 +11,7 @@ def build_system_prompt(
     supplementary: str = "",
     *,
     vision: bool = False,
+    glossary: dict[str, str] | None = None,
 ) -> str:
     source = language_name_for_prompt(source_lang)
     target = language_name_for_prompt(target_lang)
@@ -57,6 +58,17 @@ def build_system_prompt(
     extra = (supplementary or "").strip()
     if extra:
         base = f"{base}\n\nAdditional instructions from the user:\n{extra}"
+
+    if glossary:
+        pairs = "; ".join(
+            f"{term} → {translation}"
+            for term, translation in list(glossary.items())[:100]
+        )
+        base += (
+            "\n\nGlossary — always render these terms exactly as given "
+            "(never translate them differently):\n"
+            f"{pairs}"
+        )
     return base
 
 

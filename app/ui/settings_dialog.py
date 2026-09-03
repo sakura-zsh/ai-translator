@@ -28,9 +28,17 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.config.schema import AppConfig, HotkeysConfig, LlmProfile, TranslationConfig, UiConfig
+from app.config.schema import (
+    HISTORY_LIMIT_MAX,
+    AppConfig,
+    HotkeysConfig,
+    LlmProfile,
+    TranslationConfig,
+    UiConfig,
+)
 from app.core.languages import TARGET_LANGUAGES
 from app.core.llm_client import LlmClient
+from app.core.presets import SCENE_PRESETS, format_glossary, parse_glossary
 from app.core.providers import PROVIDER_TEMPLATES, ProviderTemplate, get_template
 from app.ui.widgets import ModelSelector
 from app.workers.tasks import FunctionWorker
@@ -41,8 +49,9 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("设置")
         # +40px headroom: the two ModelSelector status lines are always
-        # reserved now so fetching models never squeezes the combo boxes.
-        self.setMinimumSize(640, 566)
+        # reserved now so fetching models never squeezes the combo boxes;
+        # +50px more for the scene/glossary rows on the translation tab.
+        self.setMinimumSize(640, 620)
         self._config = deepcopy(config)
         self._pool = QThreadPool.globalInstance()
         self._testing = False
@@ -375,23 +384,52 @@ class SettingsDialog(QDialog):
         self.t_ocr_langs = QLineEdit(self._config.translation.ocr_langs)
         self.t_ocr_langs.setPlaceholderText("eng+chi_sim")
 
+        self.t_tesseract = QLineEdit(self._config.translation.tesseract_path)
+        self.t_tesseract.setPlaceholderText("tesseract（留空用 PATH）")
+        self.t_tesseract.setToolTip("OCR 引擎 tesseract 可执行文件的路径，修改后立即生效")
+
         self.t_autocopy = QCheckBox("翻译完成后自动复制结果到剪贴板")
         self.t_autocopy.setChecked(self._config.translation.auto_copy_result)
+
+        self.t_scene = QComboBox()
+        for preset in SCENE_PRESETS:
+            self.t_scene.addItem(preset.label, preset.id)
+        idx = self.t_scene.findData(self._config.translation.scene)
+        self.t_scene.setCurrentIndex(max(0, idx))
+        self.t_scene.setToolTip("主窗口工具栏也可随时切换；场景预设与下方补充提示词叠加生效")
 
         self.t_prompt = QPlainTextEdit()
         self.t_prompt.setPlaceholderText(
             "可选：补充提示词，例如「使用正式书面语」「保留术语英文原文」"
         )
         self.t_prompt.setPlainText(self._config.translation.supplementary_prompt)
-        self.t_prompt.setMinimumHeight(120)
+        # Kept compact: it sits right under the scene combo as a secondary input.
+        self.t_prompt.setMinimumHeight(56)
+        self.t_prompt.setMaximumHeight(96)
+
+        self.t_glossary = QPlainTextEdit()
+        self.t_glossary.setPlaceholderText(
+            "每行一条术语，分隔符支持 = 、→、-> 或 Tab，最多 100 条：\n"
+            "GPU = 显卡\n"
+            "LLM = 大语言模型"
+        )
+        self.t_glossary.setPlainText(format_glossary(self._config.translation.glossary))
+        self.t_glossary.setMinimumHeight(72)
+        self.t_glossary.setMaximumHeight(120)
 
         form.addRow("默认目标语言", self.t_target)
         form.addRow("图片翻译模式", self.t_image_mode)
         form.addRow("OCR 语言包", self.t_ocr_langs)
+        form.addRow("Tesseract 路径", self.t_tesseract)
         form.addRow("", self.t_autocopy)
+        form.addRow("翻译场景", self.t_scene)
         form.addRow("补充提示词", self.t_prompt)
+        form.addRow("术语表", self.t_glossary)
 
-        hint = QLabel("补充提示词会附加到系统提示之后，用于指定语气、领域或术语偏好。")
+        hint = QLabel(
+            "翻译时场景预设在前、个人补充提示词在后，两者叠加生效；"
+            "术语表中的术语将严格按指定译法渲染。主窗口工具栏也可随时切换场景。"
+        )
         hint.setObjectName("hintLabel")
         hint.setWordWrap(True)
         form.addRow(hint)
@@ -409,6 +447,18 @@ class SettingsDialog(QDialog):
         idx = self.u_theme.findData(self._config.ui.theme)
         self.u_theme.setCurrentIndex(max(0, idx))
         form.addRow("主题", self.u_theme)
+
+        self.u_tray = QCheckBox("关闭时最小化到托盘")
+        self.u_tray.setChecked(self._config.ui.close_to_tray)
+        self.u_tray.setToolTip("需要系统支持托盘；不支持托盘的桌面（部分 Wayland）会自动忽略")
+        form.addRow("", self.u_tray)
+
+        self.u_history = QSpinBox()
+        self.u_history.setRange(0, HISTORY_LIMIT_MAX)
+        self.u_history.setSuffix(" 条")
+        self.u_history.setValue(self._config.history_limit)
+        self.u_history.setToolTip("历史面板保留的记录条数（0 为不记录历史）")
+        form.addRow("历史条数", self.u_history)
 
         hk = self._config.ui.hotkeys
         self.h_translate = QLineEdit(hk.translate)
@@ -440,18 +490,23 @@ class SettingsDialog(QDialog):
         if item:
             self._config.active_profile_id = item.data(Qt.ItemDataRole.UserRole)
 
+        old_t = self._config.translation
         self._config.translation = TranslationConfig(
-            source_lang=self._config.translation.source_lang,
+            source_lang=old_t.source_lang,
             target_lang=self.t_target.currentData() or "zh",
             image_mode=self.t_image_mode.currentData() or "ocr",
             supplementary_prompt=self.t_prompt.toPlainText().strip(),
             ocr_langs=self.t_ocr_langs.text().strip() or "eng+chi_sim",
             auto_copy_result=self.t_autocopy.isChecked(),
+            scene=self.t_scene.currentData() or old_t.scene,
+            glossary=parse_glossary(self.t_glossary.toPlainText()),
+            tesseract_path=self.t_tesseract.text().strip(),
         )
+        old_ui = self._config.ui
         self._config.ui = UiConfig(
             theme=self.u_theme.currentData() or "dark",
-            window_width=self._config.ui.window_width,
-            window_height=self._config.ui.window_height,
+            window_width=old_ui.window_width,
+            window_height=old_ui.window_height,
             hotkeys=HotkeysConfig(
                 translate=self.h_translate.text().strip() or "Ctrl+Return",
                 screenshot=self.h_screenshot.text().strip() or "Ctrl+Shift+S",
@@ -460,7 +515,17 @@ class SettingsDialog(QDialog):
                 copy_result=self.h_copy.text().strip() or "Ctrl+Shift+C",
                 extract_text=self.h_extract.text().strip() or "Ctrl+Shift+T",
             ),
+            # Fields without a control on this dialog: preserve as-is.
+            window_maximized=old_ui.window_maximized,
+            splitter_sizes=old_ui.splitter_sizes,
+            close_to_tray=self.u_tray.isChecked(),
         )
+        # History limit lives on AppConfig (not UiConfig); shrinking it also
+        # truncates the in-memory history so the panel matches immediately.
+        limit = int(self.u_history.value())
+        self._config.history_limit = limit
+        if len(self._config.history) > limit:
+            self._config.history = self._config.history[:limit]
         self.accept()
 
     def result_config(self) -> AppConfig:

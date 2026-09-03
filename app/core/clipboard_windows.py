@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import io
-
-from PIL import Image
-from PySide6.QtCore import QBuffer, QByteArray
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QApplication
 
 from app.core.clipboard_image import ClipboardImageError
+from app.core.imaging import normalize_to_png
+from app.core.qtimage import qimage_to_png_bytes
 
 
 class ClipboardImageService:
@@ -40,9 +38,9 @@ class ClipboardImageService:
         if md.hasImage():
             img = md.imageData()
             if isinstance(img, QImage) and not img.isNull():
-                return self._qimage_to_png(img)
+                return self._encode(img)
             if isinstance(img, QPixmap) and not img.isNull():
-                return self._qimage_to_png(img.toImage())
+                return self._encode(img.toImage())
 
         # 2) Raw image/* mime payloads
         for fmt in (
@@ -58,33 +56,18 @@ class ClipboardImageService:
                 raw = bytes(md.data(fmt))
                 if raw:
                     try:
-                        return self._to_png(raw)
-                    except ClipboardImageError:
-                        qimg = QImage.fromData(raw)
-                        if not qimg.isNull():
-                            return self._qimage_to_png(qimg)
+                        return normalize_to_png(raw)
+                    except ValueError:
+                        # PIL could not decode it; give Qt's decoder a chance.
+                        encoded = qimage_to_png_bytes(QImage.fromData(raw))
+                        if encoded:
+                            return encoded
 
         raise ClipboardImageError("Clipboard has no image data")
 
     @staticmethod
-    def _qimage_to_png(image: QImage) -> bytes:
-        if image.isNull():
-            raise ClipboardImageError("Empty image")
-        qba = QByteArray()
-        buf = QBuffer(qba)
-        buf.open(QBuffer.OpenModeFlag.WriteOnly)
-        if image.save(buf, "PNG"):
-            return bytes(qba)
-        raise ClipboardImageError("Failed to encode clipboard image as PNG")
-
-    @staticmethod
-    def _to_png(raw: bytes) -> bytes:
-        try:
-            with Image.open(io.BytesIO(raw)) as img:
-                if img.mode not in ("RGB", "RGBA"):
-                    img = img.convert("RGBA")
-                buf = io.BytesIO()
-                img.save(buf, format="PNG")
-                return buf.getvalue()
-        except Exception as exc:  # PIL.UnidentifiedImageError etc.
-            raise ClipboardImageError(f"Invalid image data: {exc}") from exc
+    def _encode(image: QImage) -> bytes:
+        encoded = qimage_to_png_bytes(image)
+        if not encoded:
+            raise ClipboardImageError("Failed to encode clipboard image as PNG")
+        return encoded

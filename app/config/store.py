@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
@@ -14,17 +15,11 @@ from app.config.schema import AppConfig
 def default_config_path() -> Path:
     if sys.platform == "win32":
         appdata = os.environ.get("APPDATA")
-        if appdata:
-            base = Path(appdata)
-        else:
-            base = Path.home() / "AppData" / "Roaming"
+        base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
         return base / "ai-translator" / "config.json"
 
     xdg = os.environ.get("XDG_CONFIG_HOME")
-    if xdg:
-        base = Path(xdg)
-    else:
-        base = Path.home() / ".config"
+    base = Path(xdg) if xdg else Path.home() / ".config"
     return base / "ai-translator" / "config.json"
 
 
@@ -37,10 +32,8 @@ class ConfigStore:
             config = AppConfig.default()
             # Best-effort first-run write; a read-only HOME or full disk must
             # not crash startup — we simply run on in-memory defaults.
-            try:
+            with contextlib.suppress(OSError):
                 self.save(config)
-            except OSError:
-                pass
             return config
         try:
             raw = self.path.read_text(encoding="utf-8")
@@ -69,13 +62,9 @@ class ConfigStore:
             os.replace(tmp_path, self.path)
             # Unix-only permission tightening; no-op semantics on Windows ACLs
             if sys.platform != "win32":
-                try:
+                with contextlib.suppress(OSError):
                     os.chmod(self.path, 0o600)
-                except OSError:
-                    pass
         except Exception:
-            try:
+            with contextlib.suppress(OSError):
                 tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
             raise
