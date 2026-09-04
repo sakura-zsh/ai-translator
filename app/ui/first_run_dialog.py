@@ -22,7 +22,7 @@ from app.config.schema import LlmProfile
 from app.core.llm_client import LlmClient
 from app.core.providers import PROVIDER_TEMPLATES, get_template
 from app.ui.widgets import ModelSelector
-from app.workers.tasks import FunctionWorker
+from app.workers.tasks import TaskRunner
 
 
 class FirstRunDialog(QDialog):
@@ -34,6 +34,7 @@ class FirstRunDialog(QDialog):
         self.setMinimumWidth(560)
         self._profile = deepcopy(profile)
         self._pool = QThreadPool.globalInstance()
+        self._runner = TaskRunner(self._pool, parent=self)
         self._testing = False
 
         root = QVBoxLayout(self)
@@ -145,10 +146,7 @@ class FirstRunDialog(QDialog):
         def work() -> str:
             return LlmClient(profile).test_connection()
 
-        worker = FunctionWorker(work)
-        worker.signals.finished.connect(self._on_test_ok)
-        worker.signals.error.connect(self._on_test_err)
-        self._pool.start(worker)
+        self._runner.run(work, self._on_test_ok, self._on_test_err)
 
     def _on_test_ok(self, reply: object) -> None:
         self._testing = False

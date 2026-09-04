@@ -38,10 +38,158 @@ from app.config.schema import (
 )
 from app.core.languages import TARGET_LANGUAGES
 from app.core.llm_client import LlmClient
-from app.core.presets import SCENE_PRESETS, format_glossary, parse_glossary
+from app.core.presets import (
+    SCENE_PRESETS,
+    all_scene_presets,
+    format_glossary,
+    parse_glossary,
+)
 from app.core.providers import PROVIDER_TEMPLATES, ProviderTemplate, get_template
 from app.ui.widgets import ModelSelector
-from app.workers.tasks import FunctionWorker
+from app.workers.tasks import TaskRunner
+
+
+class SceneManageDialog(QDialog):
+    """Add / edit / delete custom translation scenes (builtins read-only)."""
+
+    def __init__(
+        self,
+        custom_scenes: list[dict[str, str]],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("管理翻译场景")
+        self.setMinimumSize(460, 420)
+        self._custom: list[dict[str, str]] = [dict(c) for c in custom_scenes]
+        self._builtin_ids = {p.id for p in SCENE_PRESETS}
+        self._loading = False
+
+        root = QVBoxLayout(self)
+
+        self.scene_list = QListWidget()
+        self.scene_list.currentItemChanged.connect(self._on_selected)
+        root.addWidget(self.scene_list, 2)
+
+        form = QFormLayout()
+        self.f_label = QLineEdit()
+        self.f_prompt = QPlainTextEdit()
+        self.f_prompt.setPlaceholderText("此场景生效时附加到系统提示之后的指令（可留空）")
+        self.f_prompt.setMinimumHeight(110)
+        form.addRow("名称", self.f_label)
+        form.addRow("提示词", self.f_prompt)
+        root.addLayout(form, 2)
+
+        self.builtin_hint = QLabel("内置场景不可修改；自定义场景可在此增删改。")
+        self.builtin_hint.setObjectName("hintLabel")
+        root.addWidget(self.builtin_hint)
+
+        row = QHBoxLayout()
+        self.btn_add = QPushButton("新增")
+        self.btn_add.clicked.connect(self._add_scene)
+        self.btn_del = QPushButton("删除")
+        self.btn_del.setObjectName("dangerButton")
+        self.btn_del.clicked.connect(self._del_scene)
+        row.addWidget(self.btn_add)
+        row.addWidget(self.btn_del)
+        row.addStretch(1)
+        root.addLayout(row)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+        self.f_label.editingFinished.connect(self._apply_editors)
+        self.f_prompt.textChanged.connect(self._apply_editors)
+
+        self._reload_list()
+        if self.scene_list.count():
+            self.scene_list.setCurrentRow(0)
+
+    # The builtin ids come straight from presets; derive without hardcoding.
+    def _reload_list(self, select_key: str | None = None) -> None:
+        self._loading = True
+        self.scene_list.clear()
+        for p in all_scene_presets(self._custom):
+            item = QListWidgetItem(p.label + ("　（内置）" if p.id in self._builtin_ids else ""))
+            item.setData(
+                Qt.ItemDataRole.UserRole,
+                ("builtin", p.id) if p.id in self._builtin_ids else ("custom", p.id),
+            )
+            self.scene_list.addItem(item)
+            if select_key and p.id == select_key:
+                self.scene_list.setCurrentItem(item)
+        self._loading = False
+
+    def _selected(self) -> tuple[str, str] | None:
+        item = self.scene_list.currentItem()
+        if item is None:
+            return None
+        kind, sid = item.data(Qt.ItemDataRole.UserRole)
+        return kind, sid
+
+    def _on_selected(self, current, _prev) -> None:
+        if current is None:
+            self.f_label.setEnabled(False)
+            self.f_prompt.setEnabled(False)
+            self.f_label.clear()
+            self.f_prompt.clear()
+            return
+        kind, sid = current.data(Qt.ItemDataRole.UserRole)
+        is_builtin = kind == "builtin"
+        self.f_label.setEnabled(not is_builtin)
+        self.f_prompt.setEnabled(not is_builtin)
+        self.btn_del.setEnabled(not is_builtin)
+        self._loading = True
+        scene = next((p for p in all_scene_presets(self._custom) if p.id == sid), None)
+        self.f_label.setText(scene.label if scene else "")
+        self.f_prompt.setPlainText(scene.prompt if scene else "")
+        self._loading = False
+
+    def _apply_editors(self) -> None:
+        if self._loading:
+            return
+        sel = self._selected()
+        if sel is None or sel[0] != "custom":
+            return
+        _, sid = sel
+        for entry in self._custom:
+            if entry["id"] == sid:
+                entry["label"] = self.f_label.text().strip() or entry["label"]
+                entry["prompt"] = self.f_prompt.toPlainText()
+                break
+        item = self.scene_list.currentItem()
+        if item is not None:
+            item.setText(self.f_label.text().strip() or item.text())
+
+    def _add_scene(self) -> None:
+        entry = {
+            "id": uuid4().hex[:12],
+            "label": f"自定义场景 {len(self._custom) + 1}",
+            "prompt": "",
+        }
+        self._custom.append(entry)
+        self._reload_list(select_key=entry["id"])
+        self.scene_list.setFocus()
+
+    def _del_scene(self) -> None:
+        sel = self._selected()
+        if sel is None or sel[0] != "custom":
+            return
+        _, sid = sel
+        self._custom = [c for c in self._custom if c["id"] != sid]
+        self._reload_list()
+        if self.scene_list.count():
+            self.scene_list.setCurrentRow(0)
+
+    def _on_accept(self) -> None:
+        self._apply_editors()
+        self.accept()
+
+    def result_scenes(self) -> list[dict[str, str]]:
+        return [dict(c) for c in self._custom]
 
 
 class SettingsDialog(QDialog):
@@ -54,6 +202,7 @@ class SettingsDialog(QDialog):
         self.setMinimumSize(640, 620)
         self._config = deepcopy(config)
         self._pool = QThreadPool.globalInstance()
+        self._runner = TaskRunner(self._pool, parent=self)
         self._testing = False
 
         root = QVBoxLayout(self)
@@ -348,10 +497,7 @@ class SettingsDialog(QDialog):
         def work() -> str:
             return LlmClient(profile).test_connection()
 
-        worker = FunctionWorker(work)
-        worker.signals.finished.connect(self._on_test_ok)
-        worker.signals.error.connect(self._on_test_err)
-        self._pool.start(worker)
+        self._runner.run(work, self._on_test_ok, self._on_test_err)
 
     def _on_test_ok(self, reply: object) -> None:
         self._testing = False
@@ -392,11 +538,15 @@ class SettingsDialog(QDialog):
         self.t_autocopy.setChecked(self._config.translation.auto_copy_result)
 
         self.t_scene = QComboBox()
-        for preset in SCENE_PRESETS:
-            self.t_scene.addItem(preset.label, preset.id)
-        idx = self.t_scene.findData(self._config.translation.scene)
-        self.t_scene.setCurrentIndex(max(0, idx))
+        self._custom_scenes = deepcopy(self._config.translation.custom_scenes)
+        self._reload_scene_combo()
         self.t_scene.setToolTip("主窗口工具栏也可随时切换；场景预设与下方补充提示词叠加生效")
+        self.btn_scene_manage = QPushButton("管理…")
+        self.btn_scene_manage.setToolTip("新增 / 修改 / 删除自定义翻译场景")
+        self.btn_scene_manage.clicked.connect(self._manage_scenes)
+        scene_row = QHBoxLayout()
+        scene_row.addWidget(self.t_scene, 1)
+        scene_row.addWidget(self.btn_scene_manage)
 
         self.t_prompt = QPlainTextEdit()
         self.t_prompt.setPlaceholderText(
@@ -422,7 +572,7 @@ class SettingsDialog(QDialog):
         form.addRow("OCR 语言包", self.t_ocr_langs)
         form.addRow("Tesseract 路径", self.t_tesseract)
         form.addRow("", self.t_autocopy)
-        form.addRow("翻译场景", self.t_scene)
+        form.addRow("翻译场景", scene_row)
         form.addRow("补充提示词", self.t_prompt)
         form.addRow("术语表", self.t_glossary)
 
@@ -435,6 +585,24 @@ class SettingsDialog(QDialog):
         form.addRow(hint)
 
         self.tabs.addTab(page, "翻译")
+
+    # ── Scene management ─────────────────────────────────────────
+    def _reload_scene_combo(self, select_id: str | None = None) -> None:
+        self.t_scene.blockSignals(True)
+        self.t_scene.clear()
+        for preset in all_scene_presets(self._custom_scenes):
+            self.t_scene.addItem(preset.label, preset.id)
+        key = select_id or self._config.translation.scene
+        idx = self.t_scene.findData(key)
+        self.t_scene.setCurrentIndex(max(0, idx))  # -1 → general
+        self.t_scene.blockSignals(False)
+
+    def _manage_scenes(self) -> None:
+        dlg = SceneManageDialog(self._custom_scenes, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._custom_scenes = dlg.result_scenes()
+        self._reload_scene_combo()
 
     # ── Appearance / hotkeys ──────────────────────────────────────
     def _build_appearance_tab(self) -> None:
@@ -467,6 +635,11 @@ class SettingsDialog(QDialog):
         self.h_paste = QLineEdit(hk.paste_image)
         self.h_swap = QLineEdit(hk.swap_langs)
         self.h_copy = QLineEdit(hk.copy_result)
+        self.h_summon = QLineEdit(hk.summon)
+        self.h_summon.setToolTip(
+            "系统级热键，任何界面下按下即唤起主窗口。仅 Windows 生效；\n"
+            "Linux 请在桌面环境/合成器中把快捷键绑定到启动命令（重复启动会唤起已运行实例）。"
+        )
 
         form.addRow("翻译", self.h_translate)
         form.addRow("截图翻译", self.h_screenshot)
@@ -474,8 +647,13 @@ class SettingsDialog(QDialog):
         form.addRow("粘贴图片", self.h_paste)
         form.addRow("交换语种", self.h_swap)
         form.addRow("复制结果", self.h_copy)
+        form.addRow("全局呼出", self.h_summon)
 
-        hint = QLabel("快捷键仅在应用窗口内生效（Qt 格式，如 Ctrl+Return、Ctrl+Shift+S）。")
+        hint = QLabel(
+            "应用内快捷键仅在窗口聚焦时生效（Qt 格式，如 Ctrl+Return）。\n"
+            "「全局呼出」为系统级热键，仅 Windows 生效；格式如 Ctrl+Alt+T，"
+            "至少含一个修饰键，支持字母/数字/F1–F24。"
+        )
         hint.setObjectName("hintLabel")
         hint.setWordWrap(True)
         form.addRow(hint)
@@ -501,6 +679,7 @@ class SettingsDialog(QDialog):
             scene=self.t_scene.currentData() or old_t.scene,
             glossary=parse_glossary(self.t_glossary.toPlainText()),
             tesseract_path=self.t_tesseract.text().strip(),
+            custom_scenes=self._custom_scenes,
         )
         old_ui = self._config.ui
         self._config.ui = UiConfig(
@@ -514,6 +693,7 @@ class SettingsDialog(QDialog):
                 swap_langs=self.h_swap.text().strip() or "Ctrl+Shift+X",
                 copy_result=self.h_copy.text().strip() or "Ctrl+Shift+C",
                 extract_text=self.h_extract.text().strip() or "Ctrl+Shift+T",
+                summon=self.h_summon.text().strip() or "Ctrl+Alt+T",
             ),
             # Fields without a control on this dialog: preserve as-is.
             window_maximized=old_ui.window_maximized,

@@ -15,16 +15,18 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from app.config.schema import AppConfig  # noqa: E402
+from app.config.schema import AppConfig, sanitize_custom_scenes  # noqa: E402
 from app.config.store import ConfigStore  # noqa: E402
+from app.core.hotkey_win import parse_hotkey  # noqa: E402
 from app.core.presets import (  # noqa: E402
+    all_scene_presets,
     effective_extra_prompt,
     format_glossary,
     get_scene,
     parse_glossary,
 )
 from app.ui.main_window import MainWindow  # noqa: E402
-from app.ui.settings_dialog import SettingsDialog  # noqa: E402
+from app.ui.settings_dialog import SceneManageDialog, SettingsDialog  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -340,6 +342,126 @@ def test_main_window_history_copy_uses_clipboard(
 
     window._on_history_copy("no-such-id")
     assert window.status_label.text() == "历史记录不存在"
+
+
+# ── Custom scenes (§ builtin + user-defined) ──────────────────────
+_CUSTOM = [{"id": "c1", "label": "古风文言", "prompt": "用文言文翻译"}]
+
+
+def test_parse_hotkey_sequences() -> None:
+    mods, vk = parse_hotkey("Ctrl+Alt+T")  # type: ignore[misc]
+    assert vk == ord("T")
+    assert mods & 0x2 and mods & 0x1  # control | alt
+    # F-keys and Win modifier parse; MOD_NOREPEAT (0x4000) always set.
+    mods, vk = parse_hotkey("Win+F5")  # type: ignore[misc]
+    assert vk == 0x70 + 4 and mods & 0x8 and mods & 0x4000
+    # Invalid: missing modifier / unknown key / two keys / empty.
+    assert parse_hotkey("T") is None
+    assert parse_hotkey("Ctrl+Alt+按") is None
+    assert parse_hotkey("Ctrl+T+F5") is None
+    assert parse_hotkey("") is None
+
+
+def test_custom_scenes_sanitized() -> None:
+    raw = [
+        {"id": " ok ", "label": "名称", "prompt": "p"},  # id whitespace-stripped
+        {"id": "dup", "label": "A"},
+        {"id": "dup", "label": "B"},  # duplicate dropped (first wins)
+        {"id": "", "label": "无 id"},  # dropped
+        {"id": "x"},  # missing label → dropped
+        "junk",  # not a dict → dropped
+    ]
+    out = sanitize_custom_scenes(raw)
+    assert [c["id"] for c in out] == ["ok", "dup"]
+    assert out[0]["prompt"] == "p"
+    assert sanitize_custom_scenes(None) == []
+    assert sanitize_custom_scenes("nope") == []
+    # Cap at 20.
+    many = [{"id": f"s{i}", "label": f"L{i}"} for i in range(30)]
+    assert len(sanitize_custom_scenes(many)) == 20
+
+
+def test_custom_scene_lookup_and_extra_prompt() -> None:
+    assert len(all_scene_presets(_CUSTOM)) == 6
+    scene = get_scene("c1", _CUSTOM)
+    assert scene.label == "古风文言"
+    # Builtin wins on id conflict; unknown → general fallback.
+    assert get_scene("academic", _CUSTOM).label == "学术论文"
+    assert get_scene("no-such", _CUSTOM).id == "general"
+
+    cfg = AppConfig().translation
+    cfg.scene = "c1"
+    cfg.custom_scenes = _CUSTOM
+    cfg.supplementary_prompt = "额外要求"
+    extra = effective_extra_prompt(cfg)
+    assert "用文言文翻译" in extra
+    assert extra.endswith("额外要求")
+
+
+def test_toolbar_combo_shows_custom_scenes(window: MainWindow) -> None:
+    window.config.translation.custom_scenes = _CUSTOM
+    window.config.translation.scene = "c1"
+    window._apply_translation_defaults()
+    assert window.scene_combo.count() == 6
+    assert window.scene_combo.currentData() == "c1"
+
+
+def test_custom_scene_change_persists(window: MainWindow, tmp_path: Path) -> None:
+    window.config.translation.custom_scenes = _CUSTOM
+    window._apply_translation_defaults()
+    idx = window.scene_combo.findData("c1")
+    assert idx >= 0
+    window.scene_combo.setCurrentIndex(idx)
+    assert window.config.translation.scene == "c1"
+    assert "古风文言" in window.status_label.text()
+    reloaded = ConfigStore(tmp_path / "config.json").load()
+    assert reloaded.translation.scene == "c1"
+
+
+def test_settings_scene_manage_and_roundtrip(qapp: QApplication) -> None:
+    manager = SceneManageDialog([], None)
+    manager._add_scene()
+    assert len(manager.result_scenes()) == 1
+    entry_id = manager.result_scenes()[0]["id"]
+    # Select the new custom scene (last row) and edit it via the editors.
+    item = manager.scene_list.item(manager.scene_list.count() - 1)
+    manager.scene_list.setCurrentItem(item)
+    manager.f_label.setText("我的场景")
+    manager.f_prompt.setPlainText("使用轻小说语气")
+    manager._apply_editors()
+    scenes = manager.result_scenes()
+    assert scenes[0]["label"] == "我的场景"
+    assert scenes[0]["prompt"] == "使用轻小说语气"
+    assert scenes[0]["id"] == entry_id
+
+    # Builtin rows are read-only.
+    dlg = SceneManageDialog([], None)
+    dlg.scene_list.setCurrentRow(0)
+    assert not dlg.f_label.isEnabled()
+    assert not dlg.btn_del.isEnabled()
+
+    # Settings dialog roundtrips custom scenes into the config.
+    config = AppConfig()
+    config.translation.custom_scenes = _CUSTOM
+    dlg2 = SettingsDialog(config)
+    assert dlg2.t_scene.count() == 6
+    idx = dlg2.t_scene.findData("c1")
+    dlg2.t_scene.setCurrentIndex(idx)
+    dlg2._on_accept()
+    result = dlg2.result_config()
+    assert result.translation.scene == "c1"
+    assert result.translation.custom_scenes == _CUSTOM
+
+
+def test_settings_summon_hotkey_roundtrip(qapp: QApplication) -> None:
+    config = AppConfig()
+    dlg = SettingsDialog(config)
+    assert dlg.h_summon.text() == "Ctrl+Alt+T"
+    dlg.h_summon.setText("Win+Shift+D")
+    dlg._on_accept()
+    assert dlg.result_config().ui.hotkeys.summon == "Win+Shift+D"
+    # Old configs without the field fall back to the default.
+    assert AppConfig.from_dict({"ui": {"hotkeys": {}}}).ui.hotkeys.summon == "Ctrl+Alt+T"
 
 
 # ── Force quit from tray (window hidden) ───────────────────────────

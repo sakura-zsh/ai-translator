@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 
 from app.core.llm_client import LlmClient
 from app.core.qtimage import qimage_to_png_bytes
-from app.workers.tasks import FunctionWorker
+from app.workers.tasks import TaskRunner
 
 # Re-exported: main_window and older code paths import it from here.
 __all__ = ["qimage_to_png_bytes", "apply_theme", "load_theme", "ModelSelector", "SourceEdit"]
@@ -70,6 +70,7 @@ class ModelSelector(QWidget):
         super().__init__(parent)
         self._profile_fn = profile_fn
         self._pool = QThreadPool.globalInstance()
+        self._runner = TaskRunner(self._pool, parent=self)
         self._busy = False
         self._fetch_active = False
 
@@ -154,10 +155,7 @@ class ModelSelector(QWidget):
         def work() -> list[str]:
             return LlmClient(profile).list_models()
 
-        worker = FunctionWorker(work)
-        worker.signals.finished.connect(self._on_fetch_ok)
-        worker.signals.error.connect(self._on_fetch_err)
-        self._pool.start(worker)
+        self._runner.run(work, self._on_fetch_ok, self._on_fetch_err)
 
     def _on_fetch_ok(self, names: object) -> None:
         self._busy = False

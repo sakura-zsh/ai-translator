@@ -46,18 +46,50 @@ SCENE_PRESETS: list[ScenePreset] = [
 
 _BY_ID = {p.id: p for p in SCENE_PRESETS}
 
+# Custom scenes are stored in the config as plain dicts:
+# {"id": str, "label": str, "prompt": str} (sanitized by the schema).
 
-def get_scene(scene_id: str) -> ScenePreset:
-    return _BY_ID.get(scene_id, _BY_ID["general"])
+
+def all_scene_presets(
+    custom_scenes: list[dict[str, str]] | None = None,
+) -> list[ScenePreset]:
+    """Builtin presets first, then the user's custom scenes."""
+    custom = [
+        ScenePreset(
+            id=str(c.get("id", "")),
+            label=str(c.get("label", "")),
+            prompt=str(c.get("prompt", "")),
+        )
+        for c in (custom_scenes or [])
+    ]
+    return SCENE_PRESETS + custom
 
 
-def scene_prompt(scene_id: str) -> str:
-    return get_scene(scene_id).prompt
+def get_scene(
+    scene_id: str, custom_scenes: list[dict[str, str]] | None = None
+) -> ScenePreset:
+    """Look up a scene by id; builtin wins over custom, general is the fallback."""
+    if scene_id in _BY_ID:
+        return _BY_ID[scene_id]
+    for c in custom_scenes or []:
+        if c.get("id") == scene_id:
+            return ScenePreset(
+                id=scene_id,
+                label=str(c.get("label", "")),
+                prompt=str(c.get("prompt", "")),
+            )
+    return _BY_ID["general"]
+
+
+def scene_prompt(
+    scene_id: str, custom_scenes: list[dict[str, str]] | None = None
+) -> str:
+    return get_scene(scene_id, custom_scenes).prompt
 
 
 def effective_extra_prompt(config: TranslationConfig) -> str:
     """Preset prompt + the user's personal supplementary prompt, combined."""
-    parts = [scene_prompt(config.scene).strip()]
+    parts = [scene_prompt(config.scene, config.custom_scenes).strip()]
     extra = (config.supplementary_prompt or "").strip()
     if extra:
         parts.append(extra)

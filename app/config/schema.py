@@ -39,6 +39,28 @@ class LlmProfile:
         return cls(**kwargs)
 
 
+CUSTOM_SCENES_MAX = 20
+
+
+def sanitize_custom_scenes(raw: Any) -> list[dict[str, str]]:
+    """Normalize user-defined scene entries: keep well-formed, unique ids."""
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in raw[:CUSTOM_SCENES_MAX]:
+        if not isinstance(item, dict):
+            continue
+        sid = str(item.get("id", "")).strip()
+        label = str(item.get("label", "")).strip()
+        prompt = str(item.get("prompt", ""))
+        if not sid or not label or sid in seen:
+            continue
+        seen.add(sid)
+        out.append({"id": sid, "label": label, "prompt": prompt})
+    return out
+
+
 @dataclass
 class TranslationConfig:
     source_lang: str = "auto"
@@ -47,10 +69,16 @@ class TranslationConfig:
     supplementary_prompt: str = ""
     ocr_langs: str = "eng+chi_sim"
     auto_copy_result: bool = False
-    scene: str = "general"  # key into app.core.presets.SCENE_PRESETS
+    scene: str = "general"  # id of a builtin or custom scene preset
     glossary: dict[str, str] = field(default_factory=dict)
     # Absolute path to the tesseract binary; empty → look up in PATH.
     tesseract_path: str = ""
+    # User-defined scenes: [{"id", "label", "prompt"}]; the five builtin
+    # presets live in app/core/presets.py and are always available.
+    custom_scenes: list[dict[str, str]] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.custom_scenes = sanitize_custom_scenes(self.custom_scenes)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> TranslationConfig:
@@ -81,6 +109,10 @@ class HotkeysConfig:
     swap_langs: str = "Ctrl+Shift+X"
     copy_result: str = "Ctrl+Shift+C"
     extract_text: str = "Ctrl+Shift+T"
+    # Global hotkey to summon the app (Windows only; on Linux/Wayland bind
+    # the launch command to a compositor shortcut — single-instance IPC
+    # makes the second launch activate the first).
+    summon: str = "Ctrl+Alt+T"
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> HotkeysConfig:

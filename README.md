@@ -9,7 +9,10 @@
 - **提取文字**：OCR 提取当前图片 / 新截图的文字到原文框并复制，不翻译
 - 已是目标语言时自动反向翻译
 - 可选：翻译完成后**自动复制**到剪贴板
-- 自定义补充提示词
+- **翻译场景**：5 个内置风格预设（通用/学术/技术/口语/正式）+ 自定义场景，与补充提示词叠加生效
+- **术语表**：固定译法（最多 100 条），翻译时严格按指定译法渲染
+- **历史记录**：可调条数（0–100），支持搜索、一键复制译文
+- 系统托盘（可关闭时最小化到托盘）、单实例唤起、Windows 全局呼出热键
 - 首次启动**服务商模板向导**；设置中可一键**拉取模型列表**（`/models`）下拉选择
 - 现代化深色 / 浅色主题（Catppuccin 风格 QSS）
 
@@ -96,6 +99,45 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build-windows.ps1
 使用正式书面中文，保留专业术语英文原文，不要意译品牌名。
 ```
 
+### 翻译场景与术语表
+
+**设置 → 翻译** 中：
+
+- **翻译场景**：内置 5 个（通用 / 学术论文 / 技术文档 / 口语化 / 正式书面，只读），点「管理…」可**新增 / 修改 / 删除自定义场景**（名称 + 提示词，最多 20 个）。翻译时场景提示词在前、个人补充提示词在后，两者叠加。主窗口工具栏可随时切换。
+- **术语表**：每行一条 `术语 = 译文`（分隔符也支持 `→`、`->` 或 Tab），最多 100 条，翻译时严格按指定译法渲染。
+
+### 历史
+
+工具栏「历史记录」打开浮层：顶部搜索框可按原文/译文过滤（不区分大小写），每张记录卡右上角「复制」一键复制译文，点击卡片可整体载入回主界面。条数在 **设置 → 外观与快捷键 → 历史条数**（0–100，调小会截断现有记录）。
+
+### 托盘与唤起
+
+- 关闭窗口默认**最小化到托盘**（可在设置关闭）；托盘菜单含显示/隐藏、截图翻译、提取文字、退出；`Ctrl+Q` 真退出。无托盘的桌面（部分 Wayland）自动降级为普通关闭。
+- **单实例**：重复启动第二个实例会自动唤起已运行实例的窗口并退出。Linux 下配合合成器快捷键实现「随用随弃」：
+
+```bash
+# niri (~/.config/niri/config.kdl)
+binds {
+    Mod+T { spawn "ai-translator"; }
+}
+# Hyprland (~/.config/hypr/hyprland.conf)
+bind = SUPER, T, exec, ai-translator
+```
+
+- **Windows 全局呼出**：`Ctrl+Alt+T`（默认，可在 **设置 → 外观与快捷键 → 全局呼出** 修改）在任何界面按下即唤起主窗口。
+
+## CLI（无界面翻译）
+
+```bash
+ai-translator-cli "Hello world"       # 直接翻译
+ai-translator-cli --clipboard -t ja   # 翻译剪贴板文本
+ai-translator-cli --clipboard --image # 翻译剪贴板图片
+ai-translator-cli --screenshot --mode vision  # 截图后 Vision 翻译
+echo 'text' | ai-translator-cli       # 管道输入
+```
+
+常用参数：`-s/-t` 源/目标语言、`--profile 名称` 指定服务商、`--no-copy` / `--no-notify` 关闭复制与通知、`--config 路径` 指定配置文件、`--verbose` 诊断输出。结果打印到 stdout 并复制到剪贴板。CLI 只读配置，不回写（与运行中的 GUI 互不干扰）。
+
 ## 快捷键（应用内）
 
 默认（可在设置中修改）：
@@ -138,19 +180,24 @@ app/
     llm_client.py          # OpenAI 兼容 HTTP 客户端
     translator.py          # 翻译编排（文本 / OCR / Vision）
     ocr.py  prompts.py  languages.py
-  workers/                 # QThreadPool 后台任务
+    hotkey_win.py          # Windows 全局呼出热键（RegisterHotKey）
+  workers/                 # QThreadPool 后台任务 + TaskRunner
   ui/                      # 主窗口、设置、主题 QSS
+  ipc.py                   # 单实例唤起（第二实例 → 通知首实例）
 packaging/
   linux/                   # PKGBUILD + makepkg 构建脚本
   windows/                 # PyInstaller spec + 构建脚本
 ```
 
-## 测试
+## 测试与 CI
 
 ```bash
-pip install pytest
-pytest -q
+pip install -e .[dev]
+ruff check app tests
+QT_QPA_PLATFORM=offscreen pytest -q
 ```
+
+GitHub Actions（`.github/workflows/ci.yml`）在 3.11/3.12/3.13 上跑 ruff + pytest（offscreen Qt），并附一次 Windows PyInstaller 冒烟构建；mypy 暂为非阻塞观察项。
 
 ## 故障排查
 
@@ -158,9 +205,12 @@ pytest -q
 |------|------|
 | Linux 窗口不显示 / 白屏 | 确认在 Wayland 会话；`echo $XDG_SESSION_TYPE`；设置 `QT_QPA_PLATFORM=wayland` |
 | Linux 截图无反应 | 确认 `grim`、`slurp` 在 PATH；niri 下直接运行 `slurp` 测试 |
+| CLI 报「未找到 wl-paste 或 xclip」 | 安装 `wl-clipboard`（Wayland）或 `xclip`（X11）；`ai-translator-cli --clipboard` 依赖它们读剪贴板 |
+| CLI 没有通知 | 桌面通知依赖 `notify-send`（libnotify），缺失时静默跳过，翻译本身不受影响 |
 | Windows 粘贴图片失败 | 先复制一张图片；部分程序复制的是文件引用而非图片数据 |
 | OCR 报缺语言包 | Linux：`sudo pacman -S tesseract-data-eng tesseract-data-chi_sim`；Windows：UB-Mannheim 安装器勾选对应语言 |
-| OCR 找不到 tesseract | Windows：安装后将 `tesseract.exe` 目录加入 PATH |
+| OCR 找不到 tesseract | Windows：安装后将 `tesseract.exe` 目录加入 PATH，或在设置中填「Tesseract 路径」 |
+| 全局呼出热键不生效（Windows） | 组合可能被其他程序占用，换一个（如 `Ctrl+Alt+Y`）；修改后需重启应用 |
 | 401 / 鉴权失败 | 检查 API Key 与 Base URL 是否匹配该服务商 |
 | 模型输出思维链/分析过程 | 客户端只提取 `<final_translation>` 标签内的结果，标签外内容自动丢弃；若模型连标签也不输出，建议更换非推理模型（如 `deepseek-chat`） |
 | Vision 报错 | 确认模型支持图像输入；或改用 OCR 模式 |

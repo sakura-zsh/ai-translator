@@ -1,6 +1,6 @@
 # 项目进度存档（AI Translator）
 
-> 最后更新：2026-09-03。本文件供跨会话恢复开发用，完成某项后请打勾并更新「当前状态」。
+> 最后更新：2026-09-04。本文件供跨会话恢复开发用，完成某项后请打勾并更新「当前状态」。
 
 ## 一、当前状态一句话
 
@@ -11,7 +11,15 @@
 ✅ 托盘退出修复：窗口隐藏时托盘「退出」无效——`quitOnLastWindowClosed` 只对可见窗口的 close 反应；`_quit()` 现在在 close() 后显式 `QApplication.quit()`。
 ✅ 新增测试：tests/test_ipc.py 4 个 + 集成测试 14 个（场景 roundtrip、提示词紧凑、summon 显隐、隐藏态 _quit 持久化、glossary 解析/roundtrip/上限、术语表+tesseract 控件 roundtrip、close_to_tray 控件、历史条数截断、历史搜索过滤、卡片复制信号分离、历史译文复制）。
 ✅ §3.4 历史面板增强（2026-09-03，127 测试全过）：HistoryPanel 顶部搜索框（textChanged → source_text+result_text 不区分大小写子串过滤，实时重渲染；`_all_entries` 缓存全量，清空搜索框恢复；无匹配显示「无匹配记录」）；HistoryCard meta 行加「复制」按钮 → `copy_requested(entry_id)` → 面板转发 → MainWindow `_on_history_copy`（复制译文到剪贴板 + 状态栏提示，面板不关闭；按钮点击不触发卡片激活）。面板高度 390→430 容纳搜索行。
-⬜️ 剩余：§3.5 TaskRunner 抽取 → §3.6 测试补齐 → §3.7 CI → §3.8 收尾（README/打包）。
+⬜️ 剩余：无（§3.x 批次全部完成；剩余事项均为跨平台实测，见下方「待实测」）。
+✅ §3.6 测试补齐（2026-09-04，148 测试全过）：新增 tests/test_ui_smoke.py 6 个（offscreen session QApplication + QMessageBox 打桩：ModelSelector 状态行高度稳定、推理模型提醒切换、模板填充 profile、工具栏切换配置持久化、提取文字回填+Qt 剪贴板自动复制（patch shutil.which 禁用 wl-copy）、首启向导构建）；test_config.py 补 schema 清洗 roundtrip（glossary 空键值清洗、history_limit 钳制 0..100 且截断、splitter_sizes 类型过滤）。其余 §3.6 清单项（CLI/glossary 注入/normalize_to_png/presets 兜底）此前已覆盖。
+✅ §3.7 CI（2026-09-04）：.github/workflows/ci.yml —— test job matrix 3.11/3.12/3.13（apt 装 offscreen Qt 依赖 → pip install -e .[dev] → ruff → offscreen pytest → mypy 非阻塞 continue-on-error）+ windows-build job（PyInstaller onedir 冒烟构建，防 spec 腐化）。注：仓库当前无远端，推送 GitHub 后生效。
+✅ §3.8 收尾（2026-09-04）：README 补 CLI 用法（含 niri/Hyprland bind 示例）、翻译场景/术语表/历史/托盘与唤起/Windows 全局呼出章节、快捷键表、故障排查新增 CLI×2 + Tesseract 路径 + 热键占用行、测试与 CI 章节、项目结构补 ipc/hotkey_win/TaskRunner。全量验证通过：148 pytest 全绿 + ruff 全绿 + 全量 UI 冒烟（窗口/历史/设置/场景管理/向导）+ `bash packaging/linux/build-package.sh` 产出 ai-translator 0.2.0-2 any.pkg.tar.zst（188K，包内含 ipc.py/hotkey_win.py）。
+✅ §3.5 TaskRunner 抽取（2026-09-04，139 测试全过）：`app/workers/tasks.py` 新增 `TaskRunner(QObject)`（busy 属性 + `run(work, on_ok=None, on_err=None)`，busy 期间二次提交直接丢弃；ok/err 回调经绑定槽 `_on_finished`/`_on_error` 分发——**勿直接把闭包连到跨线程信号**，PySide 对非 QObject 接收者持弱引用会丢回调/段错误）；busy 视觉部分（_set_busy/按钮禁用）仍留在各调用方。五处样板全部迁移：main_window（translate_text/translate_image/screenshot/extract）、settings_dialog（test_connection）、first_run_dialog（test_connection）、widgets.py ModelSelector（fetch_models）。FunctionWorker 不再被 UI 层直接引用。
+✅ 新增测试 5 个（tests/test_task_runner.py，专用 QThreadPool）：结果投递+busy 复位、异常对象投递（类型保留）、busy 期间二次提交忽略、无回调安全、任务确在 worker 线程执行。
+✅ 自定义翻译场景（2026-09-04，134 测试全过）：5 个内置场景（presets.py SCENE_PRESETS，只读）+ 用户自定义（config `translation.custom_scenes`，dict {id,label,prompt}，schema `sanitize_custom_scenes` 清洗去重上限 20）；`all_scene_presets`/`get_scene(id, custom)`/`scene_prompt`/`effective_extra_prompt` 全部支持 custom；设置→翻译页「管理…」按钮打开 SceneManageDialog（内置只读标记，自定义可增删改，编辑实时写回）；工具栏与设置页下拉均动态重建（_apply_translation_defaults / _reload_scene_combo），删除当前选中自定义场景自动回退通用。
+✅ Windows 全局呼出热键（2026-09-04）：`app/core/hotkey_win.py`（ctypes RegisterHotKey/UnregisterHotKey，MOD_NOREPEAT，纯函数 parse_hotkey 可跨平台单测：Ctrl/Alt/Shift/Win + 字母/数字/F1–F24，必须含修饰键）；MainWindow `_setup_windows_hotkey`（win32 only，init 与 reload_config 时注册/重注册）+ `nativeEvent` 捕获 WM_HOTKEY → `summon()`（托盘隐藏态可用）+ closeEvent 注销；配置 `ui.hotkeys.summon` 默认 "Ctrl+Alt+T"，设置→外观页新增「全局呼出」行（Linux 下该字段无效，提示用合成器快捷键绑定启动命令）。Windows 端注册/唤起行为待实测。
+✅ 新增测试 7 个（集成共 21 个）：parse_hotkey 序列（含非法输入）、custom_scenes 清洗/上限、自定义场景查找/叠加提示词、工具栏下拉显示自定义场景、自定义场景切换持久化、场景管理对话框增改+内置只读+设置 roundtrip、summon 热键 roundtrip（含旧配置缺字段回退默认）。
 ✅ Windows 打包瘦身（2026-09-03）：① pyproject 依赖 `PySide6` → `PySide6-Essentials>=6.6`（代码只用 Core/Gui/Widgets/Network，已 grep 确认；省掉 Addons 的 WebEngine/3D 等 ~1GB）；② spec excludes 全部未用 PySide6 子模块 + tkinter；③ build-windows.ps1 去掉 `--clean`（保留 PyInstaller 依赖分析缓存，重建显著加速）和 `pip install --upgrade`（免每次联网检查）。注：PySide6 应用首次打包 5–15 分钟属正常，非卡死。Windows 端打包待实测。
 ⚠️ 升级注意：旧版本实例持有锁且无 IPC，升级后需先彻底退出旧实例（Ctrl+Q 或托盘退出），否则第二实例会提示"暂时无法通知"。
 

@@ -48,7 +48,7 @@ from app.config.store import ConfigStore
 from app.core.clipboard_image import ClipboardImageError, ClipboardImageService
 from app.core.languages import SOURCE_LANGUAGES, TARGET_LANGUAGES
 from app.core.ocr import OcrService, install_hint
-from app.core.presets import SCENE_PRESETS, effective_extra_prompt, get_scene
+from app.core.presets import all_scene_presets, effective_extra_prompt, get_scene
 from app.core.qtimage import qimage_to_png_bytes
 from app.core.screenshot import (
     ScreenshotCancelled,
@@ -59,7 +59,7 @@ from app.core.translator import TranslateResult, Translator
 from app.ui.history_panel import HistoryPanel
 from app.ui.settings_dialog import SettingsDialog
 from app.ui.widgets import SourceEdit, apply_theme
-from app.workers.tasks import FunctionWorker
+from app.workers.tasks import TaskRunner
 
 log = logging.getLogger(__name__)
 
@@ -75,6 +75,7 @@ class MainWindow(QMainWindow):
         self.screenshot = ScreenshotService()
         self.clipboard_image = ClipboardImageService()
         self.pool = QThreadPool.globalInstance()
+        self.runner = TaskRunner(self.pool, parent=self)
         self._busy = False
         self._current_image: bytes | None = None
         self._after_capture: str = "translate"  # "translate" | "extract"
@@ -91,6 +92,9 @@ class MainWindow(QMainWindow):
         self._apply_translation_defaults()
         self._setup_tray()
         self._install_hotkeys()
+        self._global_hotkey: tuple[int, int] | None = None
+        if sys.platform == "win32":
+            self._setup_windows_hotkey()
         self._set_status("就绪")
 
     # ── Translator lifecycle ─────────────────────────────────────
@@ -138,9 +142,9 @@ class MainWindow(QMainWindow):
         top.addSpacing(8)
         top.addWidget(QLabel("场景"))
         self.scene_combo = QComboBox()
-        for preset in SCENE_PRESETS:
-            self.scene_combo.addItem(preset.label, preset.id)
-        self.scene_combo.setToolTip("翻译风格预设（设置的「翻译」页也可修改，与补充提示词叠加生效）")
+        # Items are (re)populated in _apply_translation_defaults so that
+        # custom scenes edited in settings show up after reload_config.
+        self.scene_combo.setToolTip("翻译风格预设（设置的「翻译」页可管理自定义场景，与补充提示词叠加生效）")
         self.scene_combo.currentIndexChanged.connect(self._on_scene_changed)
         top.addWidget(self.scene_combo)
         top.addStretch(1)
@@ -378,6 +382,12 @@ class MainWindow(QMainWindow):
             self.mode_vision.setChecked(True)
         else:
             self.mode_ocr.setChecked(True)
+        # Rebuild from builtin + custom scenes (custom list may have changed).
+        self.scene_combo.blockSignals(True)
+        self.scene_combo.clear()
+        for preset in all_scene_presets(t.custom_scenes):
+            self.scene_combo.addItem(preset.label, preset.id)
+        self.scene_combo.blockSignals(False)
         scene_idx = self.scene_combo.findData(t.scene)
         self.scene_combo.setCurrentIndex(max(0, scene_idx))
         self._update_swap_enabled()
@@ -415,7 +425,8 @@ class MainWindow(QMainWindow):
         if sid and sid != self.config.translation.scene:
             self.config.translation.scene = sid
             self._save_config()
-            self._set_status(f"场景：{get_scene(sid).label}")
+            label = get_scene(sid, self.config.translation.custom_scenes).label
+            self._set_status(f"场景：{label}")
 
     def _open_settings(self) -> None:
         self._persist()
@@ -436,6 +447,30 @@ class MainWindow(QMainWindow):
         self._reload_profiles()
         self._apply_translation_defaults()
         self._install_hotkeys()
+        if sys.platform == "win32":
+            self._setup_windows_hotkey()
+
+    # ── Windows global hotkey (summon) ────────────────────────────
+    def _setup_windows_hotkey(self) -> None:
+        from app.core.hotkey_win import register_summon_hotkey, unregister_summon_hotkey
+
+        unregister_summon_hotkey(self)  # idempotent re-register
+        sequence = self.config.ui.hotkeys.summon
+        if register_summon_hotkey(self, sequence):
+            log.info("global summon hotkey registered: %s", sequence)
+        else:
+            log.warning("global summon hotkey not registered: %s", sequence)
+            self._set_status(f"全局呼出热键不可用：{sequence}")
+
+    def nativeEvent(self, event_type, message):  # noqa: N802
+        # WM_HOTKEY for the global summon hotkey (works while tray-hidden).
+        if sys.platform == "win32" and event_type == "windows_generic_MSG":
+            from app.core.hotkey_win import is_summon_hotkey_message
+
+            if is_summon_hotkey_message(message):
+                self.summon()
+                return True, 0
+        return super().nativeEvent(event_type, message)
 
     # ── Hotkeys ───────────────────────────────────────────────────
     def _install_hotkeys(self) -> None:
@@ -537,10 +572,7 @@ class MainWindow(QMainWindow):
             )
             return {"result": result, "elapsed": time.perf_counter() - started}
 
-        worker = FunctionWorker(work)
-        worker.signals.finished.connect(self._on_translate_ok)
-        worker.signals.error.connect(self._on_translate_err)
-        self.pool.start(worker)
+        self.runner.run(work, self._on_translate_ok, self._on_translate_err)
 
     def _on_translate_ok(self, payload: object) -> None:
         self._set_busy(False)
@@ -753,10 +785,7 @@ class MainWindow(QMainWindow):
             )
             return {"result": result, "elapsed": time.perf_counter() - started}
 
-        worker = FunctionWorker(work)
-        worker.signals.finished.connect(self._on_translate_ok)
-        worker.signals.error.connect(self._on_translate_err)
-        self.pool.start(worker)
+        self.runner.run(work, self._on_translate_ok, self._on_translate_err)
 
     def _on_screenshot(self) -> None:
         self._begin_capture("translate")
@@ -804,10 +833,7 @@ class MainWindow(QMainWindow):
             return self.screenshot.capture_region()
 
         self._set_busy(True, "框选区域中…（Esc 取消）")
-        worker = FunctionWorker(work)
-        worker.signals.finished.connect(self._on_screenshot_ok)
-        worker.signals.error.connect(self._on_screenshot_err)
-        self.pool.start(worker)
+        self.runner.run(work, self._on_screenshot_ok, self._on_screenshot_err)
 
     def _screenshot_gui_thread(self) -> None:
         # Modal Qt overlay — must run on the GUI thread.
@@ -878,10 +904,7 @@ class MainWindow(QMainWindow):
         def work() -> str:
             return self.translator.ocr.extract_text(png, langs=langs)
 
-        worker = FunctionWorker(work)
-        worker.signals.finished.connect(self._on_extract_ok)
-        worker.signals.error.connect(self._on_extract_err)
-        self.pool.start(worker)
+        self.runner.run(work, self._on_extract_ok, self._on_extract_err)
 
     def _on_extract_ok(self, text: object) -> None:
         self._set_busy(False)
@@ -1018,6 +1041,10 @@ class MainWindow(QMainWindow):
         # after teardown; queued-but-unstarted tasks are dropped.
         self.pool.clear()
         self.pool.waitForDone(2000)
+        if sys.platform == "win32":
+            from app.core.hotkey_win import unregister_summon_hotkey
+
+            unregister_summon_hotkey(self)
         self._persist()
         self._save_config()
         super().closeEvent(event)

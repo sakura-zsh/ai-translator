@@ -168,3 +168,47 @@ def test_history_roundtrip() -> None:
     assert len(restored.history) == 1
     assert restored.history[0].source_text == "こんにちは"
     assert restored.history[0].mode == "ocr"
+
+
+# ── v0.2 field sanitization roundtrips ────────────────────────────
+def test_glossary_cleaning_on_load() -> None:
+    raw = {
+        "translation": {
+            "glossary": {
+                "GPU": "显卡",
+                "  ": "空白键丢弃",
+                "空值丢弃": "   ",
+                "  LLM ": "  大语言模型  ",
+            }
+        }
+    }
+    t = AppConfig.from_dict(raw).translation
+    assert t.glossary == {"GPU": "显卡", "LLM": "大语言模型"}
+    assert "  " not in t.glossary
+
+
+def test_history_limit_clamped() -> None:
+    assert AppConfig.from_dict({"history_limit": 500}).history_limit == 100
+    assert AppConfig.from_dict({"history_limit": -3}).history_limit == 0
+    assert AppConfig.from_dict({"history_limit": "25"}).history_limit == 25
+    # Pushing beyond the limit truncates the list (newest kept).
+    cfg = AppConfig.from_dict({"history_limit": 2})
+    for i in range(5):
+        cfg.push_history(
+            source_lang="en",
+            target_lang="zh",
+            mode="text",
+            source_text=f"s{i}",
+            result_text=f"d{i}",
+        )
+    assert len(cfg.history) == 2
+    assert cfg.history[0].source_text == "s4"
+
+
+def test_splitter_sizes_type_filtering() -> None:
+    cfg = AppConfig.from_dict(
+        {"ui": {"splitter_sizes": [300, "250", None, 4.0, "bad", True, [1]]}}
+    )
+    # bool is an int subclass → included; strings/None/lists dropped.
+    assert cfg.ui.splitter_sizes == [300, 4, 1]
+    assert AppConfig.from_dict({"ui": {"splitter_sizes": "junk"}}).ui.splitter_sizes == []
