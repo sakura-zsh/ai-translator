@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QApplication
 
 from app import __version__
 from app.config.store import ConfigStore
+from app.core import hotkey_win
 from app.ipc import ActivateServer, notify_running
 from app.logsetup import setup_logging
 from app.ui.first_run_dialog import FirstRunDialog
@@ -67,6 +68,11 @@ def main() -> int:
     window = MainWindow(store, config)
     window.show()
     log.info("AI Translator %s started", __version__)
+
+    # Windows global summon hotkey: app-level WM_HOTKEY filter is the
+    # primary delivery path (inert off-Windows). Local keeps it alive
+    # for the whole event loop; underscore marks it as intentionally held.
+    _hotkey_filter = hotkey_win.install_native_filter(window.summon)
 
     # Single-instance activation: later launches summon this window. The
     # server is parented to the app so it lives until process exit.

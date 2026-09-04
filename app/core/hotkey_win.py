@@ -12,6 +12,8 @@ from __future__ import annotations
 import logging
 import sys
 
+from PySide6.QtCore import QAbstractNativeEventFilter
+
 log = logging.getLogger(__name__)
 
 SUMMON_HOTKEY_ID = 1
@@ -125,3 +127,46 @@ def is_summon_hotkey_message(message: object) -> bool:
     except Exception:
         log.debug("WM_HOTKEY parse failed", exc_info=True)
         return False
+
+
+class HotkeyNativeFilter(QAbstractNativeEventFilter):
+    """App-level filter for WM_HOTKEY — the reliable delivery path.
+
+    Application-level native event filters see every window message that
+    Qt dispatches, before any per-widget nativeEvent. This avoids relying
+    on the per-widget path, which can silently miss messages depending on
+    Qt's internal dispatch. Off-Windows this filter is fully inert.
+    """
+
+    def __init__(self, on_summon: object, parent: object | None = None) -> None:
+        super().__init__()  # type: ignore[no-untyped-call]
+        self._on_summon = on_summon
+
+    def nativeEventFilter(self, event_type: object, message: object) -> tuple[bool, int]:
+        if is_summon_hotkey_message(message):
+            try:
+                self._on_summon()  # type: ignore[operator]
+            except Exception:
+                log.error("summon callback failed", exc_info=True)
+            return True, 0
+        return False, 0
+
+
+def install_native_filter(on_summon: object) -> HotkeyNativeFilter | None:
+    """Install the app-level WM_HOTKEY filter on the running QApplication.
+
+    Returns the filter instance (caller must keep it alive) or None
+    off-Windows / without an application object.
+    """
+    if sys.platform != "win32":
+        return None
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is None:
+        log.warning("no QApplication; global hotkey filter not installed")
+        return None
+    flt = HotkeyNativeFilter(on_summon)
+    app.installNativeEventFilter(flt)  # type: ignore[arg-type]
+    log.info("global hotkey native filter installed")
+    return flt

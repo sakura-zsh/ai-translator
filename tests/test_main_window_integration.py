@@ -362,6 +362,21 @@ def test_parse_hotkey_sequences() -> None:
     assert parse_hotkey("") is None
 
 
+def test_hotkey_native_filter_inert_off_windows(qapp: QApplication) -> None:
+    from app.core.hotkey_win import HotkeyNativeFilter, install_native_filter
+
+    called: list[object] = []
+    flt = HotkeyNativeFilter(called.append)
+    # Off-Windows (and Windows non-HOTKEY messages) must pass through
+    # untouched — no summon, no swallow.
+    for etype, msg in (("windows_generic_MSG", 0), ("unix_generic_MSG", 0)):
+        assert flt.nativeEventFilter(etype, msg) == (False, 0)
+    assert called == []
+
+    # install_native_filter is a no-op off-Windows.
+    assert install_native_filter(called.append) is None
+
+
 def test_custom_scenes_sanitized() -> None:
     raw = [
         {"id": " ok ", "label": "名称", "prompt": "p"},  # id whitespace-stripped

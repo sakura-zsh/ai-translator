@@ -93,9 +93,10 @@ class MainWindow(QMainWindow):
         self._setup_tray()
         self._install_hotkeys()
         self._global_hotkey: tuple[int, int] | None = None
-        if sys.platform == "win32":
-            self._setup_windows_hotkey()
         self._set_status("就绪")
+        if sys.platform == "win32":
+            # Last so its success/failure tray balloon is not overwritten.
+            self._setup_windows_hotkey(notify=True)
 
     # ── Translator lifecycle ─────────────────────────────────────
     def _rebuild_translator(self) -> None:
@@ -451,19 +452,44 @@ class MainWindow(QMainWindow):
             self._setup_windows_hotkey()
 
     # ── Windows global hotkey (summon) ────────────────────────────
-    def _setup_windows_hotkey(self) -> None:
+    def _setup_windows_hotkey(self, notify: bool = False) -> None:
         from app.core.hotkey_win import register_summon_hotkey, unregister_summon_hotkey
 
         unregister_summon_hotkey(self)  # idempotent re-register
         sequence = self.config.ui.hotkeys.summon
         if register_summon_hotkey(self, sequence):
             log.info("global summon hotkey registered: %s", sequence)
+            if notify:
+                # Startup confirmation: proves registration succeeded without
+                # digging through logs; non-blocking tray balloon.
+                self._notify_tray("全局热键已启用", f"按 {sequence} 呼出窗口")
         else:
             log.warning("global summon hotkey not registered: %s", sequence)
             self._set_status(f"全局呼出热键不可用：{sequence}")
+            self._notify_tray(
+                "全局热键不可用",
+                f"{sequence} 注册失败，可能被其他程序占用",
+                warning=True,
+            )
+
+    def _notify_tray(
+        self, title: str, body: str, *, warning: bool = False
+    ) -> None:
+        """Non-blocking tray balloon; no-op when no tray icon exists."""
+        tray = getattr(self, "_tray", None)
+        if tray is None:
+            return
+        icon = (
+            QSystemTrayIcon.MessageIcon.Warning
+            if warning
+            else QSystemTrayIcon.MessageIcon.Information
+        )
+        tray.showMessage(title, body, icon, 3000)
 
     def nativeEvent(self, event_type, message):  # noqa: N802
-        # WM_HOTKEY for the global summon hotkey (works while tray-hidden).
+        # Fallback delivery for the summon hotkey (primary path is the
+        # app-level HotkeyNativeFilter in main.py). Summon() is idempotent,
+        # so a double delivery is harmless.
         if sys.platform == "win32" and event_type == "windows_generic_MSG":
             from app.core.hotkey_win import is_summon_hotkey_message
 
