@@ -38,8 +38,10 @@ $Iscc = $IsccCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
 if ($Iscc) {
     Write-Host ""
     Write-Host "==> Building installer with Inno Setup"
-    $Version = (Select-String -Path (Join-Path $Root "pyproject.toml") `
-        -Pattern '^version\s*=\s*"(.+)"').Matches[0].Groups[1].Value
+    # pyproject.toml uses dynamic versioning (single source of truth: app/__init__.py)
+    $Version = (Select-String -Path (Join-Path $Root "app\__init__.py") `
+        -Pattern '^__version__\s*=\s*"(.+?)"').Matches[0].Groups[1].Value
+    if (-not $Version) { throw "Could not read __version__ from app\__init__.py" }
     Write-Host "    Version: $Version"
     & $Iscc "/DAppVersion=$Version" (Join-Path $WinDir "ai-translator.iss")
     if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }

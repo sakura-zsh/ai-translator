@@ -363,18 +363,25 @@ def test_parse_hotkey_sequences() -> None:
 
 
 def test_hotkey_native_filter_inert_off_windows(qapp: QApplication) -> None:
+    import sys as _sys
+
     from app.core.hotkey_win import HotkeyNativeFilter, install_native_filter
 
     called: list[object] = []
     flt = HotkeyNativeFilter(called.append)
-    # Off-Windows (and Windows non-HOTKEY messages) must pass through
-    # untouched — no summon, no swallow.
+    # Off-Windows (and Windows non-HOTKEY/null-pointer messages) must pass
+    # through untouched — no summon, no swallow.
     for etype, msg in (("windows_generic_MSG", 0), ("unix_generic_MSG", 0)):
         assert flt.nativeEventFilter(etype, msg) == (False, 0)
     assert called == []
 
-    # install_native_filter is a no-op off-Windows.
-    assert install_native_filter(called.append) is None
+    if _sys.platform == "win32":
+        # On Windows the filter is real and must be kept alive by the caller.
+        installed = install_native_filter(called.append)
+        assert isinstance(installed, HotkeyNativeFilter)
+    else:
+        # install_native_filter is a no-op off-Windows.
+        assert install_native_filter(called.append) is None
 
 
 def test_custom_scenes_sanitized() -> None:

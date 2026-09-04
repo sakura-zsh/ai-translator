@@ -8,15 +8,27 @@ on a specific desktop environment (niri, hyprland, GNOME custom binds…).
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import time
 import uuid
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QCoreApplication, QObject, Signal
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 log = logging.getLogger(__name__)
 
 ACTIVATE_SERVER_NAME = "ai-translator-activate"
+
+# Client sockets still flushing their payload (see notify_running).
+_pending_sockets: list[QLocalSocket] = []
+
+
+def _discard_client_socket(sock: QLocalSocket) -> None:
+    """Drop the kept-alive reference once the payload is fully flushed."""
+    with contextlib.suppress(ValueError):
+        _pending_sockets.remove(sock)
+    sock.deleteLater()
 
 
 class ActivateServer(QObject):
@@ -86,8 +98,26 @@ def notify_running(
     payload = (command.strip() + "\n").encode("utf-8")
     sock.write(payload)
     sock.flush()
-    sock.waitForBytesWritten(timeout_ms)
     sock.disconnectFromServer()
+    # Windows named-pipe quirk: neither waitForBytesWritten nor
+    # waitForDisconnected drains QLocalSocket's write buffer (the former
+    # always returns False); the payload is only flushed through the event
+    # loop while the socket sits in ClosingState. A plain local variable
+    # would be garbage-collected on return, aborting the write — the
+    # running instance then never receives the command, silently breaking
+    # single-instance summon on Windows. Keep a reference and pump the
+    # loop until the socket reaches UnconnectedState (bounded by timeout);
+    # async callers release it via the `disconnected` signal.
+    _pending_sockets.append(sock)
+    sock.disconnected.connect(lambda s=sock: _discard_client_socket(s))
+    app = QCoreApplication.instance()
+    deadline = time.monotonic() + timeout_ms / 1000
+    while (
+        app is not None
+        and sock.state() != QLocalSocket.LocalSocketState.UnconnectedState
+        and time.monotonic() < deadline
+    ):
+        app.processEvents()
     return True
 
 

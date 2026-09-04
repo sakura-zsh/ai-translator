@@ -120,9 +120,17 @@ def is_summon_hotkey_message(message: object) -> bool:
     if sys.platform != "win32":
         return False
     try:
+        addr = int(message)
+    except Exception:
+        return False
+    if not addr:
+        # Null pointer (e.g. the "inert off-Windows" test path): reading it
+        # would segfault and Python-level try/except cannot catch that.
+        return False
+    try:
         from ctypes import wintypes
 
-        msg = wintypes.MSG.from_address(int(message))  # type: ignore[arg-type]
+        msg = wintypes.MSG.from_address(addr)  # type: ignore[arg-type]
         return int(msg.message) == WM_HOTKEY and int(msg.wParam) == SUMMON_HOTKEY_ID
     except Exception:
         log.debug("WM_HOTKEY parse failed", exc_info=True)
