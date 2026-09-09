@@ -22,12 +22,13 @@
 |------|-----------------|---------|
 | 截图 | `slurp` + `grim` | Qt 全屏遮罩框选（多屏支持） |
 | 剪贴板图片 | `wl-paste` | Qt clipboard |
+| TTS 播放 | QtMultimedia（FFmpeg 后端） | QtMultimedia（Media Foundation） |
 | 配置路径 | `~/.config/ai-translator/` | `%APPDATA%\ai-translator\` |
 | 打包 | makepkg（pacman） | PyInstaller（onedir） |
 
 ## 依赖
 
-- Python ≥ 3.11，`PySide6`、`httpx`、`Pillow`
+- Python ≥ 3.11，`PySide6`（Essentials）、`httpx`、`Pillow`、`edge-tts`
 - 可选系统依赖：
   - **Linux**：`grim`、`slurp`（截图）、`wl-clipboard`（剪贴板图片）、`tesseract` + 语言包（OCR 模式）
   - **Windows**：[Tesseract for Windows](https://github.com/UB-Mannheim/tesseract/wiki)（OCR 模式，需加入 PATH）
@@ -126,6 +127,13 @@ bind = SUPER, T, exec, ai-translator
 
 - **Windows 全局呼出**：`Ctrl+Alt+T`（默认，可在 **设置 → 外观与快捷键 → 全局呼出** 修改）在任何界面按下即唤起主窗口。
 
+### 朗读（TTS）
+
+- 「原文」「译文」卡片标题行右侧各有一个 🔊 按钮：**单击**正常语速朗读该侧文本，**右键**慢速复述（-50%，适合跟读单词）。
+- **设置 → 翻译** 中可切换发音音色（默认晓晓 · 中文女声，支持粘贴任意 edge-tts 音色名，如 `en-GB-SoniaNeural`）、语速偏移（-50% ~ +100%）、并开启「翻译完成后自动朗读译文」；「试听」按钮可直接验证当前配置。
+- 引擎为 [edge-tts](https://github.com/anyaudio/edge-tts)（微软 Edge 神经语音，免费、无需 API Key），**合成需联网**；合成结果按 音色+语速+文本 缓存到本地（`~/.cache/ai-translator/tts/`，Windows 在 `%LOCALAPPDATA%\ai-translator\cache\tts`），同一文本重复朗读零延迟。
+- Linux 包将其列为可选依赖（AUR `python-edge-tts`）；未安装时朗读按钮会提示「语音引擎不可用」。升级到新版本后，启动时状态栏会显示「已更新到 v…」——若未见该提示，说明看到的是升级前驻留的旧实例，请先彻底退出（`Ctrl+Q` / 托盘退出）。
+
 ## CLI（无界面翻译）
 
 ```bash
@@ -211,6 +219,9 @@ GitHub Actions（`.github/workflows/ci.yml`）在 3.11/3.12/3.13 上跑 ruff + p
 | OCR 报缺语言包 | Linux：`sudo pacman -S tesseract-data-eng tesseract-data-chi_sim`；Windows：UB-Mannheim 安装器勾选对应语言 |
 | OCR 找不到 tesseract | Windows：安装后将 `tesseract.exe` 目录加入 PATH，或在设置中填「Tesseract 路径」 |
 | 全局呼出热键不生效（Windows） | 组合可能被其他程序占用，换一个（如 `Ctrl+Alt+Y`）；修改后需重启应用 |
+| 朗读报「语音合成失败」 | 合成需联网；确认可访问微软语音服务，或稍后重试 |
+| 朗读报「语音引擎不可用」 | Linux 包需安装 `python-edge-tts`（AUR）或 `pip install --user edge-tts` |
+| 升级后界面没变化 | 启动状态栏应显示「已更新到 v…」；若没有，说明旧实例还在驻留——先 `Ctrl+Q` / 托盘退出再启动 |
 | 401 / 鉴权失败 | 检查 API Key 与 Base URL 是否匹配该服务商 |
 | 模型输出思维链/分析过程 | 客户端只提取 `<final_translation>` 标签内的结果，标签外内容自动丢弃；若模型连标签也不输出，建议更换非推理模型（如 `deepseek-chat`） |
 | Vision 报错 | 确认模型支持图像输入；或改用 OCR 模式 |
