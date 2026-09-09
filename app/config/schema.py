@@ -120,6 +120,39 @@ class HotkeysConfig:
         return cls(**{k: v for k, v in data.items() if k in known})
 
 
+TTS_RATE_MIN = -50
+TTS_RATE_MAX = 100
+
+
+@dataclass
+class TtsConfig:
+    """Text-to-speech settings (edge-tts engine, see app/core/tts.py)."""
+
+    # Any edge-tts voice name; the settings dialog offers a curated list
+    # and allows pasting arbitrary voice identifiers.
+    voice: str = "zh-CN-XiaoxiaoNeural"
+    # Speaking-rate offset in percent: -50 slow … +100 fast; 0 = normal.
+    rate: int = 0
+    # Read the translation aloud automatically when a translation finishes.
+    auto_pronounce: bool = False
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> TtsConfig:
+        if not isinstance(data, dict):
+            data = {}
+        known = {f.name for f in fields(cls)}
+        kwargs = {k: v for k, v in data.items() if k in known}
+        voice = str(kwargs.get("voice", "") or "").strip()
+        kwargs["voice"] = voice or "zh-CN-XiaoxiaoNeural"
+        try:
+            rate = int(kwargs.get("rate", 0))
+        except (TypeError, ValueError):
+            rate = 0
+        kwargs["rate"] = max(TTS_RATE_MIN, min(rate, TTS_RATE_MAX))
+        kwargs["auto_pronounce"] = bool(kwargs.get("auto_pronounce", False))
+        return cls(**kwargs)
+
+
 @dataclass
 class UiConfig:
     theme: Literal["dark", "light"] = "dark"
@@ -181,8 +214,13 @@ class AppConfig:
     profiles: list[LlmProfile] = field(default_factory=list)
     translation: TranslationConfig = field(default_factory=TranslationConfig)
     ui: UiConfig = field(default_factory=UiConfig)
+    tts: TtsConfig = field(default_factory=TtsConfig)
     history: list[HistoryEntry] = field(default_factory=list)
     history_limit: int = HISTORY_LIMIT_DEFAULT
+    # Version of the app that last ran this config; used to surface
+    # upgrades ("已更新到 …") on startup and to detect stale instances
+    # after a package upgrade.
+    last_run_version: str = ""
 
     def __post_init__(self) -> None:
         if not self.profiles:
@@ -239,7 +277,9 @@ class AppConfig:
                 translation_raw if isinstance(translation_raw, dict) else {}
             ),
             ui=UiConfig.from_dict(ui_raw if isinstance(ui_raw, dict) else {}),
+            tts=TtsConfig.from_dict(data.get("tts")),
             history=[],
+            last_run_version=str(data.get("last_run_version", "") or ""),
             history_limit=int(data.get("history_limit", HISTORY_LIMIT_DEFAULT)),
         )
         cfg.history = [

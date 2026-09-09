@@ -30,10 +30,13 @@ from PySide6.QtWidgets import (
 
 from app.config.schema import (
     HISTORY_LIMIT_MAX,
+    TTS_RATE_MAX,
+    TTS_RATE_MIN,
     AppConfig,
     HotkeysConfig,
     LlmProfile,
     TranslationConfig,
+    TtsConfig,
     UiConfig,
 )
 from app.core.languages import TARGET_LANGUAGES
@@ -45,8 +48,22 @@ from app.core.presets import (
     parse_glossary,
 )
 from app.core.providers import PROVIDER_TEMPLATES, ProviderTemplate, get_template
+from app.core.tts import TextToSpeech, TtsPlayer
 from app.ui.widgets import ModelSelector
 from app.workers.tasks import TaskRunner
+
+# Curated edge-tts voices; arbitrary voice ids can be pasted into the combo.
+TTS_VOICE_CHOICES: list[tuple[str, str]] = [
+    ("晓晓 · 中文女声", "zh-CN-XiaoxiaoNeural"),
+    ("云希 · 中文男声", "zh-CN-YunxiNeural"),
+    ("云健 · 中文男声", "zh-CN-YunjianNeural"),
+    ("Aria · 英语女声（美）", "en-US-AriaNeural"),
+    ("Jenny · 英语女声（美）", "en-US-JennyNeural"),
+    ("Guy · 英语男声（美）", "en-US-GuyNeural"),
+    ("Sonia · 英语女声（英）", "en-GB-SoniaNeural"),
+]
+
+_TTS_PREVIEW_TEXT = "Hello, this is a voice preview. 你好，这是语音试听。"
 
 
 class SceneManageDialog(QDialog):
@@ -198,11 +215,15 @@ class SettingsDialog(QDialog):
         self.setWindowTitle("设置")
         # +40px headroom: the two ModelSelector status lines are always
         # reserved now so fetching models never squeezes the combo boxes;
-        # +50px more for the scene/glossary rows on the translation tab.
-        self.setMinimumSize(640, 620)
+        # +50px more for the scene/glossary rows on the translation tab;
+        # +40px more for the TTS rows (voice/rate/auto/preview).
+        self.setMinimumSize(640, 660)
         self._config = deepcopy(config)
         self._pool = QThreadPool.globalInstance()
         self._runner = TaskRunner(self._pool, parent=self)
+        self._tts_runner = TaskRunner(self._pool, parent=self)  # preview synth
+        self._tts = TextToSpeech()
+        self._tts_player = TtsPlayer(self)
         self._testing = False
 
         root = QVBoxLayout(self)
@@ -510,6 +531,36 @@ class SettingsDialog(QDialog):
         self.btn_test.setEnabled(True)
         self.test_status.setText(f"失败：{exc}")
 
+    # ── TTS preview ───────────────────────────────────────────────
+    def _preview_tts(self) -> None:
+        """Synthesize + play a sample with the currently selected voice."""
+        if getattr(self, "_tts_busy", False):
+            return
+        voice = self.t_voice.currentData() or self.t_voice.currentText().strip()
+        if not voice:
+            return
+        rate = self.t_tts_rate.value()
+        self._tts_busy = True
+        self.btn_tts_preview.setEnabled(False)
+        self.btn_tts_preview.setText("合成中…")
+        self._tts_runner.run(
+            lambda: self._tts.speak(_TTS_PREVIEW_TEXT, voice, rate),
+            on_ok=self._on_tts_preview_ok,
+            on_err=self._on_tts_preview_err,
+        )
+
+    def _on_tts_preview_ok(self, path: object) -> None:
+        self._tts_busy = False
+        self.btn_tts_preview.setEnabled(True)
+        self.btn_tts_preview.setText("试听")
+        self._tts_player.play(path)  # type: ignore[arg-type]
+
+    def _on_tts_preview_err(self, exc: object) -> None:
+        self._tts_busy = False
+        self.btn_tts_preview.setEnabled(True)
+        self.btn_tts_preview.setText("试听")
+        self.test_status.setText(f"语音试听失败：{exc}")
+
     # ── Translation tab ───────────────────────────────────────────
     def _build_translation_tab(self) -> None:
         page = QWidget()
@@ -567,6 +618,42 @@ class SettingsDialog(QDialog):
         self.t_glossary.setMinimumHeight(72)
         self.t_glossary.setMaximumHeight(120)
 
+        # ── Text-to-speech (edge-tts) ─────────────────────────────
+        self.t_voice = QComboBox()
+        self.t_voice.setEditable(True)
+        for label, voice_id in TTS_VOICE_CHOICES:
+            self.t_voice.addItem(label, voice_id)
+        current_voice = self._config.tts.voice
+        idx = self.t_voice.findData(current_voice)
+        if idx < 0:  # a custom voice id from config → keep it visible
+            self.t_voice.addItem(current_voice, current_voice)
+            idx = self.t_voice.count() - 1
+        self.t_voice.setCurrentIndex(idx)
+        self.t_voice.setToolTip(
+            "edge-tts 音色；可手动粘贴任意音色名（如 en-GB-SoniaNeural）"
+        )
+
+        self.t_tts_rate = QSpinBox()
+        self.t_tts_rate.setRange(TTS_RATE_MIN, TTS_RATE_MAX)
+        self.t_tts_rate.setSuffix("%")
+        self.t_tts_rate.setValue(self._config.tts.rate)
+        self.t_tts_rate.setToolTip("语速偏移：负值慢速（学习单词时常用 -50）")
+
+        self.t_tts_auto = QCheckBox("翻译完成后自动朗读译文")
+        self.t_tts_auto.setChecked(self._config.tts.auto_pronounce)
+
+        self.btn_tts_preview = QPushButton("试听")
+        self.btn_tts_preview.setToolTip("用当前音色和语速合成一句示例并播放（需联网）")
+        self.btn_tts_preview.clicked.connect(self._preview_tts)
+        preview_row = QHBoxLayout()
+        preview_row.addWidget(self.btn_tts_preview)
+        preview_row.addStretch(1)
+
+        form.addRow("发音音色", self.t_voice)
+        form.addRow("语速偏移", self.t_tts_rate)
+        form.addRow("", self.t_tts_auto)
+        form.addRow("语音试听", preview_row)
+
         form.addRow("默认目标语言", self.t_target)
         form.addRow("图片翻译模式", self.t_image_mode)
         form.addRow("OCR 语言包", self.t_ocr_langs)
@@ -575,6 +662,11 @@ class SettingsDialog(QDialog):
         form.addRow("翻译场景", scene_row)
         form.addRow("补充提示词", self.t_prompt)
         form.addRow("术语表", self.t_glossary)
+
+        tts_hint = QLabel("朗读使用微软 Edge 语音（edge-tts），合成时需联网；音频会缓存到本地。")
+        tts_hint.setObjectName("hintLabel")
+        tts_hint.setWordWrap(True)
+        form.addRow(tts_hint)
 
         hint = QLabel(
             "翻译时场景预设在前、个人补充提示词在后，两者叠加生效；"
@@ -706,6 +798,14 @@ class SettingsDialog(QDialog):
         self._config.history_limit = limit
         if len(self._config.history) > limit:
             self._config.history = self._config.history[:limit]
+
+        old_tts = self._config.tts
+        voice = self.t_voice.currentData() or self.t_voice.currentText().strip()
+        self._config.tts = TtsConfig(
+            voice=voice or old_tts.voice,
+            rate=self.t_tts_rate.value(),
+            auto_pronounce=self.t_tts_auto.isChecked(),
+        )
         self.accept()
 
     def result_config(self) -> AppConfig:

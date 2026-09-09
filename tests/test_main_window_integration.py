@@ -384,6 +384,90 @@ def test_hotkey_native_filter_inert_off_windows(qapp: QApplication) -> None:
         assert install_native_filter(called.append) is None
 
 
+# ── TTS speak buttons ───────────────────────────────────────────────
+def test_speak_buttons_dispatch_to_their_own_pane(window: MainWindow) -> None:
+    """Regression: both buttons used to read the result pane (string
+    mismatch between the button label and _speak's dispatch key)."""
+    window.source_edit.setPlainText("source text")
+    window.result_edit.setPlainText("result text")
+
+    captured: list[tuple[str, bool]] = []
+
+    def fake_speak(what: str, slow: bool = False) -> None:
+        captured.append((what, slow))
+
+    window._speak = fake_speak  # type: ignore[method-assign]
+
+    # Icon must be present (emoji rendered as tofu on some Windows fonts).
+    assert not window.btn_speak_src.icon().isNull()
+    assert not window.btn_speak_result.icon().isNull()
+
+    window.btn_speak_src.click()
+    window.btn_speak_result.click()
+    window.btn_speak_src.customContextMenuRequested.emit(window.btn_speak_src.rect().center())
+
+    assert captured == [("原文", False), ("译文", False), ("原文", True)]
+
+
+def test_speak_unknown_target_is_a_noop(window: MainWindow) -> None:
+    # Unknown keys must not silently fall through to the result pane.
+    window._speak("朗读原文")  # legacy mislabeled key
+    assert window.status_label.text() == "就绪"
+
+
+def test_tts_playback_state_resets_status(window: MainWindow) -> None:
+    window._set_status("朗读中…")
+    window._on_tts_state("playing")
+    assert window.status_label.text() == "朗读中…"
+    window._on_tts_state("stopped")
+    assert window.status_label.text() == "就绪"
+    window._set_status("朗读中…")
+    window._on_tts_state("error: device lost")
+    assert "播放失败" in window.status_label.text()
+
+
+# ── Version bump detection ──────────────────────────────────────────
+def test_version_bump_detected_on_startup(window: MainWindow) -> None:
+    from app import __version__
+
+    window.config.last_run_version = "0.2.0"
+    window._check_version_bump()
+    assert "已更新" in window.status_label.text()
+    assert __version__ in window.status_label.text()
+    assert window.config.last_run_version == __version__
+
+
+def test_version_unchanged_keeps_ready_status(window: MainWindow) -> None:
+    from app import __version__
+
+    window.config.last_run_version = __version__
+    window._check_version_bump()
+    assert window.status_label.text() == "就绪"
+
+
+def test_version_first_run_stores_silently(window: MainWindow) -> None:
+    window.config.last_run_version = ""
+    window._check_version_bump()
+    # First run records the version without an upgrade message.
+    assert window.status_label.text() == "就绪"
+    assert window.config.last_run_version != ""
+
+
+def test_speak_icon_follows_theme(window: MainWindow) -> None:
+    """Regression: standard style icon was white-on-white in light theme."""
+    window.config.ui.theme = "dark"
+    dark = window._make_speaker_icon(window._speak_icon_color())
+    window.config.ui.theme = "light"
+    window._refresh_speak_icons()
+    light = window.btn_speak_src.icon()
+
+    body_dark = dark.pixmap(64, 64).toImage().pixelColor(16, 32)
+    body_light = light.pixmap(64, 64).toImage().pixelColor(16, 32)
+    assert body_dark.isValid() and body_light.isValid()
+    # Glyph colors must differ — same color as the background is invisible.
+    assert body_dark != body_light
+
+
 def test_custom_scenes_sanitized() -> None:
     raw = [
         {"id": " ok ", "label": "名称", "prompt": "p"},  # id whitespace-stripped

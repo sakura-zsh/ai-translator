@@ -1,7 +1,7 @@
 # Maintainer: sakura
 pkgname=ai-translator
-pkgver=0.2.0
-pkgrel=2
+pkgver=0.4.0
+pkgrel=1
 pkgdesc="Lightweight cross-platform AI translator (Linux/Wayland)"
 arch=('any')
 url="https://github.com/anomalyco/ai-translator"
@@ -25,6 +25,7 @@ optdepends=(
   'tesseract: OCR image translation mode'
   'tesseract-data-eng: English OCR language data'
   'tesseract-data-chi_sim: Simplified Chinese OCR language data'
+  'python-edge-tts: TTS pronunciation (AUR; without it the speak buttons show an error)'
 )
 source=("$pkgname-$pkgver.tar.gz")
 sha256sums=('SKIP')

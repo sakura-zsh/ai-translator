@@ -18,9 +18,10 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    # Only QtCore/QtGui/QtWidgets/QtNetwork are used. Excluding every other
-    # PySide6 submodule keeps the analysis fast and the dist small when a
-    # full PySide6 (Addons) is installed in the build environment.
+    # QtCore/QtGui/QtWidgets/QtNetwork + QtMultimedia (TTS playback) are
+    # used. Excluding every other PySide6 submodule keeps the analysis fast
+    # and the dist small when a full PySide6 (Addons) is installed in the
+    # build environment.
     excludes=[
         "PySide6.QtQml",
         "PySide6.QtQuick",
@@ -38,8 +39,6 @@ a = Analysis(
         "PySide6.Qt3DLogic",
         "PySide6.Qt3DAnimation",
         "PySide6.Qt3DExtras",
-        "PySide6.QtMultimedia",
-        "PySide6.QtMultimediaWidgets",
         "PySide6.QtCharts",
         "PySide6.QtDataVisualization",
         "PySide6.QtGraphs",

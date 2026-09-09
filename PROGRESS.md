@@ -1,8 +1,22 @@
 # 项目进度存档（AI Translator）
 
-> 最后更新：2026-09-04。本文件供跨会话恢复开发用，完成某项后请打勾并更新「当前状态」。
+> 最后更新：2026-09-09。本文件供跨会话恢复开发用，完成某项后请打勾并更新「当前状态」。
 
 ## 一、当前状态一句话
+
+**0.4.0 已开启：TTS 朗读功能核心完成（158 测试全过，ruff 全绿）。**
+✅ 引擎：`app/core/tts.py`（edge-tts 神经语音，异步合成在 worker 线程 asyncio.run，超时 30s；音频缓存 `~/.cache/ai-translator/tts/`（Windows %LOCALAPPDATA%\ai-translator\cache\tts），sha1(voice|rate|text) 键，上限 200 个自动清最旧；TtsPlayer 懒加载 QMediaPlayer/QAudioOutput，offscreen 环境不创建媒体后端）。
+✅ 配置：`AppConfig.tts: TtsConfig`（voice 默认 zh-CN-XiaoxiaoNeural，rate -50..+100 钳制，auto_pronounce 开关；from_dict 全清洗）。
+✅ UI：原文/译文卡片标题行 🔊 按钮（单击正常语速，右键慢速 -50%）；`_on_translate_ok` 自动朗读（auto_pronounce）；独立 `_tts_runner` 与翻译 TaskRunner 并行不互斥；合成期间双按钮禁用。
+✅ 设置→翻译页：发音音色下拉（7 个精选音色 + 可粘贴任意 edge-tts 音色名）、语速偏移 SpinBox(-50..+100%)、自动朗读复选框、「试听」按钮（网络合成+播放，失败提示在服务商测试状态行）。
+✅ 打包：Windows spec 移回 QtMultimedia/QtMultimediaWidgets（TTS 播放需要）；pyproject 加 `edge-tts>=6.1`；PKGBUILD optdepends 加 python-edge-tts（官方仓库无此包、仅 AUR；缺失时按钮报「语音引擎不可用」优雅降级）；版本号 0.2.0 → 0.4.0（pkgrel=1）。
+✅ 测试：tests/test_tts.py 9 个（缓存键确定性、缓存命中不合成、合成失败清理、缺引擎降级、缓存清理、播放器懒加载、TtsConfig 清洗与 roundtrip）。
+⬜️ 0.4 剩余：Windows 端实测 TTS（合成/播放/自动朗读）；可选增强（历史卡片发音、生词本、发音热键）。
+✅ TTS 首轮实测反馈修复（2026-09-09，161 测试全过）：① 发音按钮串台——按钮标识传的是「朗读原文/朗读译文」而 _speak 派发键是「原文/译文」，字符串不匹配导致两按钮都落到译文分支；已统一传「原文/译文」且 _speak 对未知键直接返回（绝不落到另一侧）；② 朗读结束状态栏「朗读中」不消失——TtsPlayer 监听 QMediaPlayer EndOfMedia → state_changed("stopped") → 主窗口恢复「就绪」（error: 前缀则提示播放失败）；③ 按钮无图标——emoji 在部分 Windows 字体渲染为豆腐块，改用 QStyle.SP_MediaVolume 标准扬声器图标。回归测试 3 个（按钮各自派发+图标非空、未知键 no-op、播放状态复位）。
+
+---
+
+## 历史：0.2.0 / §3.x 批次
 
 **§3.2 之后新增：单实例唤起（IPC）+ 场景进设置页 + 托盘退出修复 + §3.3 全部完成（124 测试全过，ruff 全绿）。**
 ✅ 单实例唤起：`app/ipc.py`（ActivateServer/notify_running，QLocalServer socket "ai-translator-activate"）；第二实例启动 → 发送 "activate" 并退出 → 首实例 `MainWindow.summon()` 弹出/聚焦窗口。niri 等合成器快捷键绑定启动命令即可恢复"呼出"工作流，不依赖任何合成器。注意：GlobalShortcuts 门户在 niri/wlroots 系不可用（无后端），未采用。

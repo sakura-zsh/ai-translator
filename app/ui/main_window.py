@@ -19,7 +19,9 @@ from PySide6.QtGui import (
     QImage,
     QKeySequence,
     QPainter,
+    QPen,
     QPixmap,
+    QPolygon,
     QShortcut,
 )
 from PySide6.QtWidgets import (
@@ -43,7 +45,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.config.schema import AppConfig, HistoryEntry
+from app import __version__
+from app.config.schema import TTS_RATE_MIN, AppConfig, HistoryEntry
 from app.config.store import ConfigStore
 from app.core.clipboard_image import ClipboardImageError, ClipboardImageService
 from app.core.languages import SOURCE_LANGUAGES, TARGET_LANGUAGES
@@ -56,6 +59,7 @@ from app.core.screenshot import (
     ScreenshotService,
 )
 from app.core.translator import TranslateResult, Translator
+from app.core.tts import TextToSpeech, TtsError, TtsPlayer
 from app.ui.history_panel import HistoryPanel
 from app.ui.settings_dialog import SettingsDialog
 from app.ui.widgets import SourceEdit, apply_theme
@@ -76,6 +80,11 @@ class MainWindow(QMainWindow):
         self.clipboard_image = ClipboardImageService()
         self.pool = QThreadPool.globalInstance()
         self.runner = TaskRunner(self.pool, parent=self)
+        self.tts = TextToSpeech()
+        self._tts_runner = TaskRunner(self.pool, parent=self)  # parallel to translate
+        self._tts_player = TtsPlayer(self)
+        self._tts_player.state_changed.connect(self._on_tts_state)
+        self._speak_busy = False
         self._busy = False
         self._current_image: bytes | None = None
         self._after_capture: str = "translate"  # "translate" | "extract"
@@ -94,9 +103,25 @@ class MainWindow(QMainWindow):
         self._install_hotkeys()
         self._global_hotkey: tuple[int, int] | None = None
         self._set_status("就绪")
+        self._check_version_bump()
         if sys.platform == "win32":
             # Last so its success/failure tray balloon is not overwritten.
             self._setup_windows_hotkey(notify=True)
+
+    def _check_version_bump(self) -> None:
+        """Surface upgrades: the config remembers the version that last ran.
+
+        After a package upgrade this makes the new version visible at a
+        glance — and a *missing* bump in the running UI means the window
+        on screen belongs to a stale pre-upgrade instance.
+        """
+        last = self.config.last_run_version
+        if last and last != __version__:
+            self._set_status(f"已更新到 v{__version__}（此前 v{last}）")
+            log.info("version change detected: %s -> %s", last, __version__)
+        if last != __version__:
+            self.config.last_run_version = __version__
+            self._save_config()
 
     # ── Translator lifecycle ─────────────────────────────────────
     def _rebuild_translator(self) -> None:
@@ -201,7 +226,12 @@ class MainWindow(QMainWindow):
         src_wrap = QFrame()
         src_wrap.setObjectName("card")
         src_l = QVBoxLayout(src_wrap)
-        src_l.addWidget(QLabel("原文"))
+        src_head = QHBoxLayout()
+        src_head.addWidget(QLabel("原文"))
+        src_head.addStretch(1)
+        self.btn_speak_src = self._make_speak_button("原文")
+        src_head.addWidget(self.btn_speak_src)
+        src_l.addLayout(src_head)
         self.source_edit = SourceEdit()
         self.source_edit.setObjectName("sourceEdit")
         self.source_edit.setPlaceholderText(
@@ -217,7 +247,12 @@ class MainWindow(QMainWindow):
         dst_wrap = QFrame()
         dst_wrap.setObjectName("card")
         dst_l = QVBoxLayout(dst_wrap)
-        dst_l.addWidget(QLabel("译文"))
+        dst_head = QHBoxLayout()
+        dst_head.addWidget(QLabel("译文"))
+        dst_head.addStretch(1)
+        self.btn_speak_result = self._make_speak_button("译文")
+        dst_head.addWidget(self.btn_speak_result)
+        dst_l.addLayout(dst_head)
         self.result_edit = QPlainTextEdit()
         self.result_edit.setObjectName("resultEdit")
         self.result_edit.setReadOnly(True)
@@ -447,6 +482,7 @@ class MainWindow(QMainWindow):
         self._rebuild_translator()
         self._reload_profiles()
         self._apply_translation_defaults()
+        self._refresh_speak_icons()
         self._install_hotkeys()
         if sys.platform == "win32":
             self._setup_windows_hotkey()
@@ -611,6 +647,10 @@ class MainWindow(QMainWindow):
         self.result_edit.setPlainText(result.text)
         if result.ocr_text and not self.source_edit.toPlainText().strip():
             self.source_edit.setPlainText(result.ocr_text)
+
+        # Auto-pronounce the translation (opt-in, settings → 翻译).
+        if self.config.tts.auto_pronounce and result.text.strip():
+            self._speak("译文")
 
         copied = ""
         if (
@@ -1031,6 +1071,118 @@ class MainWindow(QMainWindow):
             self._set_status("译文已复制到剪贴板")
         else:
             self._set_status("复制失败：剪贴板不可用")
+
+    # ── Text-to-speech ────────────────────────────────────────────
+    def _speak_icon_color(self) -> str:
+        """Speaker-glyph color matching each QSS theme's button text."""
+        return "#4c4f69" if self.config.ui.theme == "light" else "#cdd6f4"
+
+    def _refresh_speak_icons(self) -> None:
+        """(Re)draw speaker icons after a theme change."""
+        icon = self._make_speaker_icon(self._speak_icon_color())
+        self.btn_speak_src.setIcon(icon)
+        self.btn_speak_result.setIcon(icon)
+
+    @staticmethod
+    def _make_speaker_icon(color: str) -> QIcon:
+        """Draw a speaker glyph — palette-dependent standard icons are
+        invisible against the light-theme button background."""
+        pix = QPixmap(64, 64)
+        pix.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pix)
+        try:
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            brush = QColor(color)
+            # Speaker body: box + cone.
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(brush)
+            body = QPolygon(
+                [
+                    QPoint(6, 24),
+                    QPoint(20, 24),
+                    QPoint(34, 10),
+                    QPoint(34, 54),
+                    QPoint(20, 40),
+                    QPoint(6, 40),
+                ]
+            )
+            p.drawPolygon(body)
+            # Two sound-wave arcs.
+            p.setPen(
+                QPen(brush, 6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+            )
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawArc(38, 18, 18, 28, -45 * 16, 90 * 16)
+            p.drawArc(46, 10, 26, 44, -45 * 16, 90 * 16)
+        finally:
+            p.end()
+        return QIcon(pix)
+
+    def _make_speak_button(self, what: str) -> QPushButton:
+        """Speak button: click = normal rate, right-click = slow replay.
+
+        `what` must be exactly "原文" or "译文" — _speak() dispatches on it.
+        The icon is drawn programmatically in a theme-contrast color.
+        """
+        btn = QPushButton()
+        btn.setObjectName("speakButton")
+        btn.setFixedSize(28, 24)
+        btn.setIcon(self._make_speaker_icon(self._speak_icon_color()))
+        btn.setIconSize(btn.size() * 0.8)
+        btn.setToolTip(f"朗读{what}（右键慢速复述）")
+        btn.clicked.connect(lambda: self._speak(what))
+        btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        btn.customContextMenuRequested.connect(
+            lambda _pos: self._speak(what, slow=True)
+        )
+        return btn
+
+    def _speak(self, what: str, slow: bool = False) -> None:
+        """Synthesize + play source or result text (worker thread)."""
+        if self._speak_busy:
+            return
+        if what == "原文":
+            text = self.source_edit.toPlainText().strip()
+        elif what == "译文":
+            text = self.result_edit.toPlainText().strip()
+        else:
+            return  # unknown target — never fall through to the other pane
+        if not text:
+            self._set_status("没有可朗读的文本")
+            return
+
+        tts = self.config.tts
+        rate = TTS_RATE_MIN if slow else tts.rate
+        self._speak_busy = True
+        self.btn_speak_src.setEnabled(False)
+        self.btn_speak_result.setEnabled(False)
+        self._set_status("语音合成中…" if not slow else "语音合成中（慢速）…")
+        self._tts_runner.run(
+            lambda: self.tts.speak(text, tts.voice, rate),
+            on_ok=lambda path: self._on_speak_ok(path, slow),
+            on_err=self._on_speak_err,
+        )
+
+    def _on_speak_ok(self, path: object, slow: bool = False) -> None:
+        self._speak_busy = False
+        self.btn_speak_src.setEnabled(True)
+        self.btn_speak_result.setEnabled(True)
+        self._tts_player.play(path)  # type: ignore[arg-type]
+        self._set_status("朗读中（慢速）…" if slow else "朗读中…")
+
+    def _on_speak_err(self, exc: Exception) -> None:
+        self._speak_busy = False
+        self.btn_speak_src.setEnabled(True)
+        self.btn_speak_result.setEnabled(True)
+        msg = str(exc) if isinstance(exc, TtsError) else f"朗读失败：{exc}"
+        self._set_status(msg)
+
+    def _on_tts_state(self, state: str) -> None:
+        """Playback lifecycle from TtsPlayer (playing / stopped / error)."""
+        if state == "stopped":
+            self._set_status("就绪")
+        elif state.startswith("error:"):
+            self._set_status(f"播放失败：{state[6:]}")
 
     def _copy_text_to_clipboard(self, text: str) -> bool:
         """Prefer wl-copy on Wayland for reliability; fall back to Qt clipboard."""
