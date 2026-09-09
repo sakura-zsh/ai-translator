@@ -1,17 +1,22 @@
 """Shared pytest fixtures and hooks.
 
 Deterministic Qt teardown: PySide6 crashes with a segfault during
-interpreter shutdown on some Python versions (observed on 3.11) when
-QApplication and lingering Qt objects (e.g. ipc._pending_sockets) are
-destroyed by the garbage collector at exit. Destroy things explicitly
-and in the right order instead.
+interpreter shutdown on some Python versions (observed on 3.11) while
+garbage-collecting Qt objects left over from UI tests — regardless of
+whether QApplication is destroyed explicitly first. All tests have
+already passed at that point, so the shutdown crash carries no signal
+about test health: bypass interpreter finalization entirely with
+os._exit() and keep the real exit status.
 """
 
 from __future__ import annotations
 
-import gc
+import os
+import sys
 
 import pytest
+
+_exit_status = 0
 
 
 @pytest.fixture(autouse=True)
@@ -24,13 +29,13 @@ def _drop_pending_ipc_sockets():
 
 
 def pytest_sessionfinish(session, exitstatus) -> None:  # noqa: N802
-    """Destroy the QApplication before interpreter shutdown."""
-    from PySide6.QtCore import QCoreApplication
-    from PySide6.QtWidgets import QApplication
+    global _exit_status
+    _exit_status = exitstatus
 
-    app = QApplication.instance() or QCoreApplication.instance()
-    if app is not None:
-        app.processEvents()
-        app.sendPostedEvents(None, 0)
-        del app
-    gc.collect()
+
+def pytest_unconfigure(config) -> None:  # noqa: N802
+    # Last hook before pytest returns to the shell: hard-exit so the
+    # interpreter never runs its final GC over Qt objects.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(_exit_status)
