@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from app.config.schema import AppConfig, LlmProfile
+from app.config.schema import AppConfig, JevConfig, LlmProfile
 from app.config.store import ConfigStore, default_config_path
 
 
@@ -118,6 +118,80 @@ def test_legacy_config_gets_new_defaults() -> None:
     cfg = AppConfig.from_dict(legacy)
     assert cfg.translation.auto_copy_result is False
     assert cfg.ui.hotkeys.extract_text == "Ctrl+Shift+T"
+
+
+# ── Jev (System One decision model) ───────────────────────────────
+def test_jev_defaults_off_and_no_hardcoded_url() -> None:
+    jev = AppConfig.default().jev
+    assert jev.enabled is False
+    # The whole point of the integration: the address is the user's.
+    assert jev.base_url == ""
+    assert jev.model == "jev-latest"
+    assert jev.api_protocol == "auto"
+    assert jev.route_scene is True
+    assert jev.detect_language is True
+    assert jev.score_quality is False
+
+
+def test_jev_roundtrip() -> None:
+    cfg = AppConfig.default()
+    cfg.jev.enabled = True
+    cfg.jev.base_url = "https://relay.example.com/v1/systemone"
+    cfg.jev.api_key = "jv_live_x"
+    cfg.jev.api_protocol = "native"
+    cfg.jev.score_quality = True
+    cfg.jev.quality_threshold = 0.75
+    cfg.jev.retry_on_low_quality = True
+
+    restored = AppConfig.from_dict(cfg.to_dict()).jev
+    assert restored.enabled is True
+    assert restored.base_url == "https://relay.example.com/v1/systemone"
+    assert restored.api_key == "jv_live_x"
+    assert restored.api_protocol == "native"
+    assert restored.score_quality is True
+    assert restored.quality_threshold == 0.75
+    assert restored.retry_on_low_quality is True
+
+
+def test_jev_from_dict_sanitizes() -> None:
+    jev = JevConfig.from_dict(
+        {
+            "enabled": 1,
+            "base_url": "  https://relay.example.com/v1  ",
+            "model": "   ",
+            "api_protocol": "nonsense",
+            "timeout_s": 1,
+            "quality_threshold": 9,
+            "score_quality": "yes",
+        }
+    )
+    assert jev.enabled is True
+    assert jev.base_url == "https://relay.example.com/v1"
+    assert jev.model == "jev-latest"  # blank falls back
+    assert jev.api_protocol == "auto"  # unknown falls back
+    assert jev.timeout_s == 5.0  # clamped to the minimum
+    assert jev.quality_threshold == 1.0  # clamped to 0..1
+    assert jev.score_quality is True
+
+
+def test_jev_from_dict_handles_garbage() -> None:
+    for raw in (None, [], "nope", 42):
+        jev = JevConfig.from_dict(raw)
+        assert jev.enabled is False
+        assert jev.base_url == ""
+
+
+def test_legacy_config_without_jev_loads() -> None:
+    legacy = {
+        "version": 1,
+        "profiles": [{"id": "default", "name": "x", "base_url": "https://a/v1"}],
+        "translation": {"source_lang": "auto", "target_lang": "zh"},
+        "ui": {"theme": "dark"},
+        "history": [],
+    }
+    cfg = AppConfig.from_dict(legacy)
+    assert cfg.jev.enabled is False
+    assert cfg.jev.base_url == ""
 
 
 def test_needs_setup_flags_untouched_default() -> None:

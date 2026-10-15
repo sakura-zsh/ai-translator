@@ -3,10 +3,18 @@
 ; Builds packaging\windows\installer\ai-translator-setup-<version>.exe
 ; from the PyInstaller output in packaging\windows\dist\ai-translator.
 ;
-; Version can be overridden:  ISCC /DAppVersion=1.2.3 ai-translator.iss
+; Overridable on the command line:
+;   ISCC /DAppVersion=1.2.3 /DDistDir=dist-1.2.3 ai-translator.iss
+; (DistDir is relative to this script; use it when building into a fresh
+; output directory — e.g. to dodge a locked/undeletable dist folder.)
 
 #ifndef AppVersion
 #define AppVersion "0.1.0"
+#endif
+
+; PyInstaller --distpath to package, relative to this .iss file.
+#ifndef DistDir
+#define DistDir "dist"
 #endif
 
 #define MyAppName "AI Translator"
@@ -34,7 +42,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; \
     GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-Source: "dist\ai-translator\*"; DestDir: "{app}"; \
+Source: "{#DistDir}\ai-translator\*"; DestDir: "{app}"; \
     Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]

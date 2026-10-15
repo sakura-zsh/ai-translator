@@ -46,6 +46,11 @@ SCENE_PRESETS: list[ScenePreset] = [
 
 _BY_ID = {p.id: p for p in SCENE_PRESETS}
 
+# Sentinel scene id meaning "let Jev pick the scene at translation time".
+# It is never a real preset — get_scene() falls back to "general".
+AUTO_SCENE_ID = "auto"
+AUTO_SCENE_LABEL = "自动判断（Jev）"
+
 # Custom scenes are stored in the config as plain dicts:
 # {"id": str, "label": str, "prompt": str} (sanitized by the schema).
 
@@ -89,8 +94,21 @@ def scene_prompt(
 
 def effective_extra_prompt(config: TranslationConfig) -> str:
     """Preset prompt + the user's personal supplementary prompt, combined."""
-    parts = [scene_prompt(config.scene, config.custom_scenes).strip()]
-    extra = (config.supplementary_prompt or "").strip()
+    return combine_extra_prompt(
+        config.scene,
+        config.custom_scenes,
+        config.supplementary_prompt,
+    )
+
+
+def combine_extra_prompt(
+    scene_id: str,
+    custom_scenes: list[dict[str, str]] | None,
+    supplementary: str,
+) -> str:
+    """Same combination, for a scene id resolved at runtime (Jev routing)."""
+    parts = [scene_prompt(scene_id, custom_scenes).strip()]
+    extra = (supplementary or "").strip()
     if extra:
         parts.append(extra)
     return "\n".join(p for p in parts if p)

@@ -49,9 +49,22 @@ from app import __version__
 from app.config.schema import TTS_RATE_MIN, AppConfig, HistoryEntry
 from app.config.store import ConfigStore
 from app.core.clipboard_image import ClipboardImageError, ClipboardImageService
-from app.core.languages import SOURCE_LANGUAGES, TARGET_LANGUAGES
+from app.core.jev_client import JevClient
+from app.core.languages import (
+    SOURCE_LANGUAGES,
+    TARGET_LANGUAGES,
+    display_name,
+    language_name_for_prompt,
+)
 from app.core.ocr import OcrService, install_hint
-from app.core.presets import all_scene_presets, effective_extra_prompt, get_scene
+from app.core.presets import (
+    AUTO_SCENE_ID,
+    AUTO_SCENE_LABEL,
+    all_scene_presets,
+    combine_extra_prompt,
+    effective_extra_prompt,
+    get_scene,
+)
 from app.core.qtimage import qimage_to_png_bytes
 from app.core.screenshot import (
     ScreenshotCancelled,
@@ -128,6 +141,90 @@ class MainWindow(QMainWindow):
         """(Re)build the translator with the configured tesseract binary."""
         tesseract_bin = self.config.translation.tesseract_path or "tesseract"
         self.translator = Translator(ocr=OcrService(tesseract_bin=tesseract_bin))
+
+    # ── Jev (System One decision model) ───────────────────────────
+    # Jev is an optional side-channel: it never translates, it only judges.
+    # Every call is best-effort — a Jev failure must never break a
+    # translation, so all three helpers swallow errors and log them.
+    def _jev_client(self) -> JevClient | None:
+        """A usable Jev client, or None when disabled / unconfigured."""
+        cfg = self.config.jev
+        if not cfg.enabled:
+            return None
+        client = JevClient(cfg)
+        return client if client.is_configured() else None
+
+    def _jev_feature(self, name: str) -> bool:
+        """True when Jev is usable *and* the named switch is on."""
+        return self._jev_client() is not None and bool(
+            getattr(self.config.jev, name, False)
+        )
+
+    def _jev_preprocess(self, text: str, source: str, scene_id: str) -> dict[str, Any]:
+        """Resolve source language / scene with Jev before translating."""
+        out: dict[str, Any] = {"source": source, "scene_id": scene_id, "notes": []}
+        client = self._jev_client()
+        if client is None or not (text or "").strip():
+            return out
+        cfg = self.config.jev
+
+        if cfg.detect_language and source == "auto":
+            try:
+                candidates = [
+                    (code, language_name_for_prompt(code))
+                    for code, _ in SOURCE_LANGUAGES
+                    if code != "auto"
+                ]
+                picked = client.detect_language(text, candidates)
+            except Exception:
+                log.warning("jev language detection failed", exc_info=True)
+                picked = None
+            if picked:
+                out["source"] = picked
+                out["notes"].append(f"Jev 语种 {display_name(picked)}")
+
+        if cfg.route_scene and scene_id == AUTO_SCENE_ID:
+            try:
+                scenes = [
+                    (preset.id, preset.label, preset.prompt)
+                    for preset in all_scene_presets(
+                        self.config.translation.custom_scenes
+                    )
+                ]
+                picked_scene = client.route_scene(text, scenes)
+            except Exception:
+                log.warning("jev scene routing failed", exc_info=True)
+                picked_scene = None
+            if picked_scene:
+                out["scene_id"] = picked_scene
+                label = get_scene(
+                    picked_scene, self.config.translation.custom_scenes
+                ).label
+                out["notes"].append(f"Jev 场景 {label}")
+        return out
+
+    def _jev_score(self, source: str, translation: str) -> float | None:
+        """Rate a finished translation 0..1; None when off or unavailable."""
+        if not self.config.jev.score_quality:
+            return None
+        client = self._jev_client()
+        if client is None:
+            return None
+        try:
+            return client.score_quality(source, translation)
+        except Exception:
+            log.warning("jev quality scoring failed", exc_info=True)
+            return None
+
+    def _jev_extra_prompt(self, scene_id: str, fallback: str) -> str:
+        """Scene-specific extra prompt, or the pre-computed fallback."""
+        if scene_id == self.config.translation.scene:
+            return fallback
+        return combine_extra_prompt(
+            scene_id,
+            self.config.translation.custom_scenes,
+            self.config.translation.supplementary_prompt,
+        )
 
     def _restore_splitter(self) -> None:
         sizes = self.config.ui.splitter_sizes
@@ -423,6 +520,8 @@ class MainWindow(QMainWindow):
         self.scene_combo.clear()
         for preset in all_scene_presets(t.custom_scenes):
             self.scene_combo.addItem(preset.label, preset.id)
+        if self._jev_feature("route_scene"):
+            self.scene_combo.addItem(AUTO_SCENE_LABEL, AUTO_SCENE_ID)
         self.scene_combo.blockSignals(False)
         scene_idx = self.scene_combo.findData(t.scene)
         self.scene_combo.setCurrentIndex(max(0, scene_idx))
@@ -461,8 +560,11 @@ class MainWindow(QMainWindow):
         if sid and sid != self.config.translation.scene:
             self.config.translation.scene = sid
             self._save_config()
-            label = get_scene(sid, self.config.translation.custom_scenes).label
-            self._set_status(f"场景：{label}")
+            if sid == AUTO_SCENE_ID:
+                self._set_status("场景：自动判断（由 Jev 按内容选择）")
+            else:
+                label = get_scene(sid, self.config.translation.custom_scenes).label
+                self._set_status(f"场景：{label}")
 
     def _open_settings(self) -> None:
         self._persist()
@@ -501,7 +603,12 @@ class MainWindow(QMainWindow):
                 self._notify_tray("全局热键已启用", f"按 {sequence} 呼出窗口")
         else:
             log.warning("global summon hotkey not registered: %s", sequence)
-            self._set_status(f"全局呼出热键不可用：{sequence}")
+            # At startup the tray balloon is the right channel: the status
+            # bar belongs to translation progress, and a permanently wrong
+            # "unavailable" line would sit there for the whole session.
+            # A runtime re-bind (settings saved) still reports inline.
+            if not notify:
+                self._set_status(f"全局呼出热键不可用：{sequence}")
             self._notify_tray(
                 "全局热键不可用",
                 f"{sequence} 注册失败，可能被其他程序占用",
@@ -601,6 +708,57 @@ class MainWindow(QMainWindow):
         self.status_label.setText(text)
 
     # ── Translate (text) ──────────────────────────────────────────
+    def _run_translation(
+        self,
+        text: str,
+        *,
+        source: str,
+        target: str,
+        profile: Any,
+        glossary: dict[str, str] | None,
+    ) -> dict[str, Any]:
+        """Jev-preprocess → translate → Jev-score (with one optional retry).
+
+        Runs on a worker thread. Jev is best-effort: when it is off or
+        fails, this degrades to the plain translation path.
+        """
+        fallback_extra = effective_extra_prompt(self.config.translation)
+        jev = self._jev_preprocess(text, source, self.config.translation.scene)
+        extra = self._jev_extra_prompt(jev["scene_id"], fallback_extra)
+
+        def translate(extra_prompt: str) -> TranslateResult:
+            return self.translator.translate_text(
+                text,
+                source_lang=jev["source"],
+                target_lang=target,
+                profile=profile,
+                supplementary_prompt=extra_prompt,
+                glossary=glossary,
+            )
+
+        result = translate(extra)
+        notes = list(jev["notes"])
+        score = self._jev_score(text, result.text)
+
+        cfg = self.config.jev
+        if (
+            score is not None
+            and cfg.retry_on_low_quality
+            and score < cfg.quality_threshold
+        ):
+            log.info("jev quality %.2f < %.2f, retrying once", score, cfg.quality_threshold)
+            retry_extra = (
+                f"{extra}\n上一版译文质量不达标，请重新翻译：优先保证忠实完整、"
+                "表达自然地道，不要遗漏信息。"
+            ).strip()
+            retried = translate(retry_extra)
+            rescored = self._jev_score(text, retried.text)
+            result = retried
+            score = rescored if rescored is not None else score
+            notes.append("质量不达标已重译")
+
+        return {"result": result, "notes": notes, "score": score}
+
     def _on_translate(self) -> None:
         if self._busy:
             return
@@ -617,22 +775,21 @@ class MainWindow(QMainWindow):
         profile = self.config.get_active_profile()
         source = self.source_combo.currentData() or "auto"
         target = self.target_combo.currentData() or "zh"
-        extra = effective_extra_prompt(self.config.translation)
         glossary = self.config.translation.glossary or None
 
         self._set_busy(True, f"翻译中… · {profile.model}")
         started = time.perf_counter()
 
         def work() -> dict[str, Any]:
-            result = self.translator.translate_text(
+            payload = self._run_translation(
                 text,
-                source_lang=source,
-                target_lang=target,
+                source=source,
+                target=target,
                 profile=profile,
-                supplementary_prompt=extra,
                 glossary=glossary,
             )
-            return {"result": result, "elapsed": time.perf_counter() - started}
+            payload["elapsed"] = time.perf_counter() - started
+            return payload
 
         self.runner.run(work, self._on_translate_ok, self._on_translate_err)
 
@@ -672,8 +829,17 @@ class MainWindow(QMainWindow):
             mode=result.mode,
             model=result.model,
         )
+        score = data.get("score")
+        jev_bit = ""
+        notes = data.get("notes") or []
+        if notes:
+            jev_bit += " · " + " · ".join(str(n) for n in notes)
+        if isinstance(score, (int, float)):
+            jev_bit += f" · 质量 {float(score):.2f}"
+
         self._set_status(
-            f"完成 · mode={result.mode} · model={result.model} · {elapsed:.2f}s{copied}"
+            f"完成 · mode={result.mode} · model={result.model} · {elapsed:.2f}s"
+            f"{copied}{jev_bit}"
         )
 
     # ── History ──────────────────────────────────────────────────
@@ -821,7 +987,6 @@ class MainWindow(QMainWindow):
         profile = self.config.get_active_profile()
         source = self.source_combo.currentData() or "auto"
         target = self.target_combo.currentData() or "zh"
-        extra = effective_extra_prompt(self.config.translation)
         glossary = self.config.translation.glossary or None
         mode = self._image_mode()
         ocr_langs = self.config.translation.ocr_langs
@@ -838,18 +1003,38 @@ class MainWindow(QMainWindow):
         self._set_busy(True, f"图片翻译中（{mode}）… · {label}")
         started = time.perf_counter()
 
+        # For OCR mode we can hand the recognised text to Jev (routing /
+        # language detection / scoring). Vision mode sends the image itself,
+        # so there is no text to judge before the model answers.
+        jev_active = mode == "ocr" and self._jev_client() is not None
+
         def work() -> dict[str, Any]:
-            result = self.translator.translate_image(
-                png,
-                mode=mode,  # type: ignore[arg-type]
-                source_lang=source,
-                target_lang=target,
-                profile=profile,
-                supplementary_prompt=extra,
-                glossary=glossary,
-                ocr_langs=ocr_langs,
-            )
-            return {"result": result, "elapsed": time.perf_counter() - started}
+            if jev_active:
+                ocr_text = self.translator.ocr.extract_text(png, langs=ocr_langs)
+                payload = self._run_translation(
+                    ocr_text,
+                    source=source,
+                    target=target,
+                    profile=profile,
+                    glossary=glossary,
+                )
+                result = payload["result"]
+                result.ocr_text = ocr_text
+                result.mode = "ocr"
+            else:
+                result = self.translator.translate_image(
+                    png,
+                    mode=mode,  # type: ignore[arg-type]
+                    source_lang=source,
+                    target_lang=target,
+                    profile=profile,
+                    supplementary_prompt=effective_extra_prompt(self.config.translation),
+                    glossary=glossary,
+                    ocr_langs=ocr_langs,
+                )
+                payload = {"result": result, "notes": [], "score": None}
+            payload["elapsed"] = time.perf_counter() - started
+            return payload
 
         self.runner.run(work, self._on_translate_ok, self._on_translate_err)
 

@@ -12,6 +12,7 @@ def _new_id() -> str:
 
 
 ApiProtocol = Literal["chat_completions", "responses"]
+JevProtocol = Literal["auto", "native", "openai"]
 
 
 @dataclass
@@ -40,6 +41,69 @@ class LlmProfile:
 
 
 CUSTOM_SCENES_MAX = 20
+
+
+JEV_QUALITY_THRESHOLD_DEFAULT = 0.6
+
+
+@dataclass
+class JevConfig:
+    """Jev — TypeSafe 的 System One 决策模型（辅助判断，不做翻译）。
+
+    Jev 不吃 ``messages``：它接收一段 ``state`` 和一组带类型的
+    ``questions``（choice / score / noul），返回带置信概率的结构化答案。
+    本应用用它做三件事：场景自动路由、源语言检测、译文质量评分。
+
+    ``base_url`` 故意留空：官方地址是 ``https://api.typesafe.ai``，但
+    用户多经由中转站调用，硬编码反而添乱，一律由用户在设置里填。
+    """
+
+    enabled: bool = False
+    # 留空 = 未配置。官方 api.typesafe.ai / OpenRouter / 自建中转皆可。
+    base_url: str = ""
+    api_key: str = ""
+    model: str = "jev-latest"
+    # auto: 依次探测原生与 OpenAI 兼容端点；native: state+questions；
+    # openai: 走 /chat/completions，要求模型回 JSON。
+    api_protocol: JevProtocol = "auto"
+    timeout_s: float = 30.0
+    # ── 三个功能开关 ──
+    route_scene: bool = True
+    detect_language: bool = True
+    score_quality: bool = False
+    # 译文质量低于阈值时是否自动重译一次（仅在 score_quality 打开时生效）。
+    quality_threshold: float = JEV_QUALITY_THRESHOLD_DEFAULT
+    retry_on_low_quality: bool = False
+
+    @classmethod
+    def from_dict(cls, data: Any) -> JevConfig:
+        if not isinstance(data, dict):
+            return cls()
+        known = {f.name for f in fields(cls)}
+        kwargs: dict[str, Any] = {k: v for k, v in data.items() if k in known}
+        proto = kwargs.get("api_protocol", "auto")
+        if proto not in ("auto", "native", "openai"):
+            kwargs["api_protocol"] = "auto"
+        kwargs["enabled"] = bool(kwargs.get("enabled", False))
+        kwargs["base_url"] = str(kwargs.get("base_url", "") or "").strip()
+        kwargs["api_key"] = str(kwargs.get("api_key", "") or "").strip()
+        model = str(kwargs.get("model", "") or "").strip()
+        kwargs["model"] = model or "jev-latest"
+        try:
+            timeout = float(kwargs.get("timeout_s", 30.0))
+        except (TypeError, ValueError):
+            timeout = 30.0
+        kwargs["timeout_s"] = max(5.0, min(timeout, 600.0))
+        for flag in ("route_scene", "detect_language", "score_quality", "retry_on_low_quality"):
+            kwargs[flag] = bool(kwargs.get(flag, cls.__dataclass_fields__[flag].default))
+        try:
+            threshold = float(
+                kwargs.get("quality_threshold", JEV_QUALITY_THRESHOLD_DEFAULT)
+            )
+        except (TypeError, ValueError):
+            threshold = JEV_QUALITY_THRESHOLD_DEFAULT
+        kwargs["quality_threshold"] = max(0.0, min(threshold, 1.0))
+        return cls(**kwargs)
 
 
 def sanitize_custom_scenes(raw: Any) -> list[dict[str, str]]:
@@ -215,6 +279,7 @@ class AppConfig:
     translation: TranslationConfig = field(default_factory=TranslationConfig)
     ui: UiConfig = field(default_factory=UiConfig)
     tts: TtsConfig = field(default_factory=TtsConfig)
+    jev: JevConfig = field(default_factory=JevConfig)
     history: list[HistoryEntry] = field(default_factory=list)
     history_limit: int = HISTORY_LIMIT_DEFAULT
     # Version of the app that last ran this config; used to surface
@@ -278,6 +343,7 @@ class AppConfig:
             ),
             ui=UiConfig.from_dict(ui_raw if isinstance(ui_raw, dict) else {}),
             tts=TtsConfig.from_dict(data.get("tts")),
+            jev=JevConfig.from_dict(data.get("jev")),
             history=[],
             last_run_version=str(data.get("last_run_version", "") or ""),
             history_limit=int(data.get("history_limit", HISTORY_LIMIT_DEFAULT)),

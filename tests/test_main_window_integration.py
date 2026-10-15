@@ -597,3 +597,278 @@ def test_close_without_tray_saves_and_quits(
     assert not window.isVisible() or window._force_quit
     reloaded = ConfigStore(tmp_path / "config.json").load()
     assert reloaded.ui.window_width == window.config.ui.window_width
+
+
+# ── Jev integration ────────────────────────────────────────────────
+def _enable_jev(window: MainWindow, **overrides: object) -> None:
+    jev = window.config.jev
+    jev.enabled = True
+    jev.base_url = "https://relay.test/v1"
+    for key, value in overrides.items():
+        setattr(jev, key, value)
+
+
+def _stub_jev(monkeypatch: pytest.MonkeyPatch, handler) -> None:  # type: ignore[no-untyped-def]
+    from app.core import jev_client as module
+
+    def fake_decide(self, state, questions, **kwargs):  # type: ignore[no-untyped-def]
+        return handler(questions)
+
+    monkeypatch.setattr(module.JevClient, "decide", fake_decide)
+
+
+def _stub_translate(window: MainWindow, monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+    from app.core.translator import TranslateResult
+
+    calls: list[dict] = []
+
+    def fake_translate(text, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append({"text": text, **kwargs})
+        return TranslateResult(text=f"译文{len(calls)}", model="demo")
+
+    monkeypatch.setattr(window.translator, "translate_text", fake_translate)
+    return calls
+
+
+def test_scene_combo_offers_auto_only_when_jev_routing_is_on(
+    window: MainWindow,
+) -> None:
+    assert window.scene_combo.findData("auto") == -1
+
+    _enable_jev(window)
+    window.reload_config(window.config)
+    assert window.scene_combo.findData("auto") >= 0
+
+    # Turning routing off removes the entry again.
+    window.config.jev.route_scene = False
+    window.reload_config(window.config)
+    assert window.scene_combo.findData("auto") == -1
+
+
+def test_jev_client_requires_enabled_and_configured(window: MainWindow) -> None:
+    assert window._jev_client() is None  # disabled by default
+
+    _enable_jev(window, base_url="")
+    assert window._jev_client() is None  # enabled but no address
+
+    _enable_jev(window)
+    assert window._jev_client() is not None
+
+
+def test_run_translation_applies_jev_language_scene_and_score(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _enable_jev(window, score_quality=True)
+    window.config.translation.scene = "auto"
+    window.config.translation.custom_scenes = []
+
+    def handler(questions: dict) -> dict:
+        if "source_language" in questions:
+            return {"source_language": {"choice": "ja"}}
+        if "scene" in questions:
+            return {"scene": {"choice": "technical"}}
+        if "quality" in questions:
+            return {"quality": {"score": 3.0}}  # 3/4 → 0.75
+        return {}
+
+    _stub_jev(monkeypatch, handler)
+    calls = _stub_translate(window, monkeypatch)
+
+    payload = window._run_translation(
+        "こんにちは",
+        source="auto",
+        target="zh",
+        profile=window.config.get_active_profile(),
+        glossary=None,
+    )
+
+    assert calls[0]["source_lang"] == "ja"  # Jev resolved the language
+    assert "代码" in calls[0]["supplementary_prompt"]  # technical preset applied
+    assert payload["score"] == pytest.approx(0.75)
+    assert any("语种" in note for note in payload["notes"])
+    assert any("场景" in note for note in payload["notes"])
+    assert len(calls) == 1  # no retry: the score is above the default threshold
+
+
+def test_low_quality_triggers_exactly_one_retry(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _enable_jev(window, score_quality=True, retry_on_low_quality=True, quality_threshold=0.9)
+    window.config.translation.scene = "auto"
+
+    def handler(questions: dict) -> dict:
+        if "scene" in questions:
+            return {"scene": {"choice": "general"}}
+        if "quality" in questions:
+            return {"quality": {"score": 0.0}}  # always "bad"
+        return {}
+
+    _stub_jev(monkeypatch, handler)
+    calls = _stub_translate(window, monkeypatch)
+
+    payload = window._run_translation(
+        "text",
+        source="en",
+        target="zh",
+        profile=window.config.get_active_profile(),
+        glossary=None,
+    )
+
+    assert len(calls) == 2  # translated, then retried once
+    assert "重新翻译" in calls[1]["supplementary_prompt"]
+    assert any("重译" in note for note in payload["notes"])
+
+
+def test_no_retry_when_score_is_acceptable(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _enable_jev(window, score_quality=True, retry_on_low_quality=True, quality_threshold=0.5)
+
+    def handler(questions: dict) -> dict:
+        return {"quality": {"score": 4.0}}  # 1.0 → above 0.5
+
+    _stub_jev(monkeypatch, handler)
+    calls = _stub_translate(window, monkeypatch)
+
+    window._run_translation(
+        "text",
+        source="en",
+        target="zh",
+        profile=window.config.get_active_profile(),
+        glossary=None,
+    )
+    assert len(calls) == 1
+
+
+def test_jev_failure_never_breaks_translation(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.core.llm_client import ApiError
+
+    _enable_jev(window, score_quality=True)
+    window.config.translation.scene = "auto"
+
+    def boom(self, state, questions, **kwargs):  # type: ignore[no-untyped-def]
+        raise ApiError("relay down")
+
+    from app.core import jev_client as module
+
+    monkeypatch.setattr(module.JevClient, "decide", boom)
+    calls = _stub_translate(window, monkeypatch)
+
+    payload = window._run_translation(
+        "text",
+        source="auto",
+        target="zh",
+        profile=window.config.get_active_profile(),
+        glossary=None,
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["source_lang"] == "auto"  # unchanged on failure
+    assert payload["score"] is None
+    assert payload["notes"] == []
+
+
+def test_disabled_jev_translates_without_any_calls(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.core import jev_client as module
+
+    def boom(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("Jev must not be called when disabled")
+
+    monkeypatch.setattr(module.JevClient, "decide", boom)
+    calls = _stub_translate(window, monkeypatch)
+
+    window._run_translation(
+        "text",
+        source="auto",
+        target="zh",
+        profile=window.config.get_active_profile(),
+        glossary=None,
+    )
+    assert len(calls) == 1
+
+
+# ── Jev settings tab ───────────────────────────────────────────────
+def test_settings_dialog_persists_jev_config(qapp: QApplication) -> None:
+    dlg = SettingsDialog(AppConfig())
+    assert dlg.tabs.tabText(dlg.tabs.count() - 2) == "Jev 判断"
+
+    dlg.j_enabled.setChecked(True)
+    dlg.j_base_url.setText("https://relay.test/v1/systemone")
+    dlg.j_api_key.setText("jv_live_x")
+    dlg.j_model.setText("jev-1.13.0")
+    dlg.j_protocol.setCurrentIndex(dlg.j_protocol.findData("native"))
+    dlg.j_detect.setChecked(False)
+    dlg.j_score.setChecked(True)
+    dlg.j_threshold.setValue(0.7)
+    dlg.j_retry.setChecked(True)
+    dlg._on_accept()
+
+    jev = dlg.result_config().jev
+    assert jev.enabled is True
+    assert jev.base_url == "https://relay.test/v1/systemone"
+    assert jev.api_key == "jv_live_x"
+    assert jev.model == "jev-1.13.0"
+    assert jev.api_protocol == "native"
+    assert jev.detect_language is False
+    assert jev.score_quality is True
+    assert jev.quality_threshold == pytest.approx(0.7)
+    assert jev.retry_on_low_quality is True
+
+
+def test_settings_base_url_is_blank_by_default(qapp: QApplication) -> None:
+    dlg = SettingsDialog(AppConfig())
+    assert dlg.j_base_url.text() == ""
+    assert "typesafe" in dlg.j_base_url.placeholderText().lower()
+
+
+def test_settings_scene_auto_entry_follows_jev_switch(qapp: QApplication) -> None:
+    dlg = SettingsDialog(AppConfig())
+    assert dlg.t_scene.findData("auto") == -1
+
+    dlg.j_enabled.setChecked(True)
+    dlg.j_route.setChecked(True)
+    assert dlg.t_scene.findData("auto") >= 0
+
+    dlg.t_scene.setCurrentIndex(dlg.t_scene.findData("auto"))
+    dlg._on_accept()
+    assert dlg.result_config().translation.scene == "auto"
+
+    # Disabling Jev drops the entry and falls back to a real preset.
+    dlg2 = SettingsDialog(dlg.result_config())
+    assert dlg2.t_scene.currentData() == "auto"
+    dlg2.j_enabled.setChecked(False)
+    assert dlg2.t_scene.findData("auto") == -1
+    assert dlg2.t_scene.currentData() == "general"
+
+
+def test_settings_jev_test_requires_base_url(qapp: QApplication) -> None:
+    dlg = SettingsDialog(AppConfig())
+    dlg.j_enabled.setChecked(True)
+    dlg.j_base_url.setText("")
+    dlg._test_jev()
+    assert "Base URL" in dlg.j_status.text()
+
+
+def test_jev_config_survives_settings_roundtrip(qapp: QApplication) -> None:
+    """Opening settings twice must not silently reset the Jev block."""
+    cfg = AppConfig()
+    cfg.jev.enabled = True
+    cfg.jev.base_url = "https://relay.test/v1"
+    cfg.jev.model = "jev-1.13.0"
+    cfg.jev.score_quality = True
+
+    dlg = SettingsDialog(cfg)
+    assert dlg.j_enabled.isChecked() is True
+    assert dlg.j_base_url.text() == "https://relay.test/v1"
+    assert dlg.j_model.text() == "jev-1.13.0"
+    dlg._on_accept()
+
+    jev = dlg.result_config().jev
+    assert jev.enabled is True
+    assert jev.base_url == "https://relay.test/v1"
+    assert jev.model == "jev-1.13.0"
+    assert jev.score_quality is True

@@ -12,8 +12,8 @@ packaging/linux/src/
 packaging/linux/pkg/
 packaging/linux/*.tar.gz
 packaging/linux/*.pkg.tar.*
-packaging/*/build/
-packaging/*/dist/
+packaging/*/build*/
+packaging/*/dist*/
 packaging/*/installer/
 packaging/*.log
 .testlibs/

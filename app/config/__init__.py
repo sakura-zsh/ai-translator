@@ -1,6 +1,7 @@
 from app.config.schema import (
     AppConfig,
     HotkeysConfig,
+    JevConfig,
     LlmProfile,
     TranslationConfig,
     UiConfig,
@@ -11,6 +12,7 @@ __all__ = [
     "AppConfig",
     "ConfigStore",
     "HotkeysConfig",
+    "JevConfig",
     "LlmProfile",
     "TranslationConfig",
     "UiConfig",

@@ -34,14 +34,18 @@ from app.config.schema import (
     TTS_RATE_MIN,
     AppConfig,
     HotkeysConfig,
+    JevConfig,
     LlmProfile,
     TranslationConfig,
     TtsConfig,
     UiConfig,
 )
+from app.core.jev_client import JevClient
 from app.core.languages import TARGET_LANGUAGES
 from app.core.llm_client import LlmClient
 from app.core.presets import (
+    AUTO_SCENE_ID,
+    AUTO_SCENE_LABEL,
     SCENE_PRESETS,
     all_scene_presets,
     format_glossary,
@@ -232,6 +236,7 @@ class SettingsDialog(QDialog):
 
         self._build_profiles_tab()
         self._build_translation_tab()
+        self._build_jev_tab()
         self._build_appearance_tab()
 
         buttons = QDialogButtonBox(
@@ -684,6 +689,8 @@ class SettingsDialog(QDialog):
         self.t_scene.clear()
         for preset in all_scene_presets(self._custom_scenes):
             self.t_scene.addItem(preset.label, preset.id)
+        if self._jev_scene_auto_available():
+            self.t_scene.addItem(AUTO_SCENE_LABEL, AUTO_SCENE_ID)
         key = select_id or self._config.translation.scene
         idx = self.t_scene.findData(key)
         self.t_scene.setCurrentIndex(max(0, idx))  # -1 → general
@@ -694,7 +701,175 @@ class SettingsDialog(QDialog):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         self._custom_scenes = dlg.result_scenes()
+        self._refresh_scene_auto_entry()
+
+    # ── Jev (System One decision model) ───────────────────────────
+    def _build_jev_tab(self) -> None:
+        page = QWidget()
+        form = QFormLayout(page)
+        j = self._config.jev
+
+        self.j_enabled = QCheckBox("启用 Jev 判断")
+        self.j_enabled.setChecked(j.enabled)
+        self.j_enabled.setToolTip(
+            "Jev 是 TypeSafe 的 System One 决策模型：它不生成文本，只接收一段 state\n"
+            "和若干带类型的问题，返回带置信概率的结构化判定。\n"
+            "本应用用它做场景路由、语种检测与译文质量评分；属于可选增强，\n"
+            "不可用时自动退回原有翻译流程。"
+        )
+        form.addRow("", self.j_enabled)
+
+        self.j_base_url = QLineEdit(j.base_url)
+        self.j_base_url.setPlaceholderText("https://api.typesafe.ai")
+        self.j_base_url.setToolTip(
+            "官方或中转站地址均可：填到 /v1、填完整地址、或直接粘贴 /v1/systemone 都能识别。\n"
+            "留空则不启用。"
+        )
+        form.addRow("Base URL", self.j_base_url)
+
+        self.j_api_key = QLineEdit(j.api_key)
+        self.j_api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.j_api_key.setPlaceholderText("jv_live_… 或中转站 Key")
+        form.addRow("API Key", self.j_api_key)
+
+        self.j_model = QLineEdit(j.model)
+        self.j_model.setPlaceholderText("jev-latest")
+        self.j_model.setToolTip("如 jev-latest、jev-1.13.0；中转站的模型名以其文档为准。")
+        form.addRow("模型", self.j_model)
+
+        self.j_protocol = QComboBox()
+        self.j_protocol.addItem("自动探测（原生优先，失败回退 OpenAI 兼容）", "auto")
+        self.j_protocol.addItem("原生 /v1/systemone（state + questions）", "native")
+        self.j_protocol.addItem("OpenAI 兼容 /chat/completions（要 JSON）", "openai")
+        idx = self.j_protocol.findData(j.api_protocol)
+        self.j_protocol.setCurrentIndex(max(0, idx))
+        self.j_protocol.setToolTip(
+            "不确定就留「自动探测」：会按候选端点依次尝试，命中后缓存，\n"
+            "两种请求体与两种响应结构都能兼容。"
+        )
+        form.addRow("接口协议", self.j_protocol)
+
+        self.j_timeout = QDoubleSpinBox()
+        self.j_timeout.setRange(5.0, 600.0)
+        self.j_timeout.setSuffix(" s")
+        self.j_timeout.setValue(float(j.timeout_s))
+        form.addRow("超时", self.j_timeout)
+
+        feature_box = QGroupBox("功能开关")
+        feature_form = QFormLayout(feature_box)
+
+        self.j_route = QCheckBox("场景自动路由")
+        self.j_route.setChecked(j.route_scene)
+        self.j_route.setToolTip(
+            "翻译前由 Jev 判断这段文本该用哪个场景。\n"
+            "需在主窗口把「场景」切换为「自动判断（Jev）」才会触发。"
+        )
+        feature_form.addRow(self.j_route)
+
+        self.j_detect = QCheckBox("语种自动检测")
+        self.j_detect.setChecked(j.detect_language)
+        self.j_detect.setToolTip("源语言为「自动检测」时，由 Jev 判定源语言后再翻译。")
+        feature_form.addRow(self.j_detect)
+
+        self.j_score = QCheckBox("译文质量评分")
+        self.j_score.setChecked(j.score_quality)
+        self.j_score.setToolTip("翻译完成后由 Jev 给译文打分（0–1），结果显示在状态栏。")
+        feature_form.addRow(self.j_score)
+
+        self.j_threshold = QDoubleSpinBox()
+        self.j_threshold.setRange(0.0, 1.0)
+        self.j_threshold.setSingleStep(0.05)
+        self.j_threshold.setDecimals(2)
+        self.j_threshold.setValue(float(j.quality_threshold))
+        self.j_threshold.setToolTip("低于该分数视为不达标（需开启「译文质量评分」）")
+        feature_form.addRow("质量阈值", self.j_threshold)
+
+        self.j_retry = QCheckBox("低于阈值时自动重译一次")
+        self.j_retry.setChecked(j.retry_on_low_quality)
+        feature_form.addRow(self.j_retry)
+
+        form.addRow(feature_box)
+
+        self.btn_jev_test = QPushButton("测试连接")
+        self.btn_jev_test.setToolTip("用当前填写的内容发一个最小判定请求，验证地址、Key 与协议")
+        self.btn_jev_test.clicked.connect(self._test_jev)
+        self.j_status = QLabel("")
+        self.j_status.setObjectName("hintLabel")
+        self.j_status.setWordWrap(True)
+        test_row = QHBoxLayout()
+        test_row.addWidget(self.btn_jev_test)
+        test_row.addWidget(self.j_status, 1)
+        form.addRow("连通性", test_row)
+
+        hint = QLabel(
+            "Jev 不会替你做翻译——它只做判断。三项功能彼此独立，可只开其中一项。\n"
+            "任何 Jev 调用失败都不会中断翻译，只会记录日志并退回默认行为。"
+        )
+        hint.setObjectName("hintLabel")
+        hint.setWordWrap(True)
+        form.addRow(hint)
+
+        # Keep the main-window scene combo semantics identical to this dialog.
+        # The initial rebuild selects the *configured* scene (the combo was
+        # first filled before this tab existed, when "auto" was not yet
+        # offered); later toggles preserve whatever the user has selected.
+        self.j_enabled.toggled.connect(self._refresh_scene_auto_entry)
+        self.j_route.toggled.connect(self._refresh_scene_auto_entry)
         self._reload_scene_combo()
+
+        self.tabs.addTab(page, "Jev 判断")
+
+    def _jev_config_from_form(self) -> JevConfig:
+        return JevConfig(
+            enabled=self.j_enabled.isChecked(),
+            base_url=self.j_base_url.text().strip(),
+            api_key=self.j_api_key.text().strip(),
+            model=self.j_model.text().strip() or "jev-latest",
+            api_protocol=self.j_protocol.currentData() or "auto",
+            timeout_s=float(self.j_timeout.value()),
+            route_scene=self.j_route.isChecked(),
+            detect_language=self.j_detect.isChecked(),
+            score_quality=self.j_score.isChecked(),
+            quality_threshold=float(self.j_threshold.value()),
+            retry_on_low_quality=self.j_retry.isChecked(),
+        )
+
+    def _jev_scene_auto_available(self) -> bool:
+        """Mirror the main window: offer 「自动判断」 only when it can work."""
+        enabled = getattr(self, "j_enabled", None)
+        route = getattr(self, "j_route", None)
+        return bool(
+            enabled is not None
+            and route is not None
+            and enabled.isChecked()
+            and route.isChecked()
+        )
+
+    def _refresh_scene_auto_entry(self) -> None:
+        current = self.t_scene.currentData()
+        self._reload_scene_combo(select_id=current or None)
+
+    def _test_jev(self) -> None:
+        cfg = self._jev_config_from_form()
+        if not cfg.base_url:
+            self.j_status.setText("请先填写 Base URL")
+            return
+        self.btn_jev_test.setEnabled(False)
+        self.j_status.setText("测试中…")
+        client = JevClient(cfg)
+
+        def work() -> str:
+            return client.test_connection()
+
+        self._runner.run(work, self._on_jev_test_ok, self._on_jev_test_err)
+
+    def _on_jev_test_ok(self, message: object) -> None:
+        self.btn_jev_test.setEnabled(True)
+        self.j_status.setText(str(message))
+
+    def _on_jev_test_err(self, exc: object) -> None:
+        self.btn_jev_test.setEnabled(True)
+        self.j_status.setText(f"失败：{exc}")
 
     # ── Appearance / hotkeys ──────────────────────────────────────
     def _build_appearance_tab(self) -> None:
@@ -806,6 +981,8 @@ class SettingsDialog(QDialog):
             rate=self.t_tts_rate.value(),
             auto_pronounce=self.t_tts_auto.isChecked(),
         )
+
+        self._config.jev = self._jev_config_from_form()
         self.accept()
 
     def result_config(self) -> AppConfig:
