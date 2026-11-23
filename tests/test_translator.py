@@ -19,6 +19,7 @@ class _StubClient:
 
     def __init__(self, profile: LlmProfile) -> None:
         self.profile = profile
+        self.warnings: list[str] = []
 
     def chat(self, messages: list[dict[str, str]], **_kwargs: object) -> str:
         return "译文"

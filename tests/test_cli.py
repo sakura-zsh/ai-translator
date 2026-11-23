@@ -22,6 +22,7 @@ class _StubClient:
 
     def __init__(self, profile) -> None:  # noqa: ANN001
         self.profile = profile
+        self.warnings: list[str] = []
 
     def chat(self, messages: list[dict], **_kwargs: object) -> str:
         _StubClient.calls.append({"kind": "text", "messages": messages})

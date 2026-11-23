@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Literal
 from uuid import uuid4
@@ -11,8 +12,116 @@ def _new_id() -> str:
     return uuid4().hex[:12]
 
 
+# Sentinels for LlmProfile.model: these are stored strings, not API ids.
+# Keeping them in the regular field means no extra schema state, and every
+# existing ``profile.model`` read site keeps working unchanged.
+MODEL_AUTO = "__auto__"
+MODEL_VISION = "__vision__"
+
+
+def is_sentinel_model(model: str) -> bool:
+    return model in (MODEL_AUTO, MODEL_VISION)
+
+
+# Reasoning models are slow and tend to leak chain-of-thought into the
+# answer — the auto picker avoids them for translation.
+_REASONING_MODEL_RE = re.compile(
+    r"reasoner|[-_]r1\b|qwq|o[134](-|$|\b)|thinking|deepseek-r\d",
+    re.IGNORECASE,
+)
+
+
+def likely_reasoning_model(name: str) -> bool:
+    return bool(_REASONING_MODEL_RE.search(name or ""))
+
+
 ApiProtocol = Literal["chat_completions", "responses"]
 JevProtocol = Literal["auto", "native", "openai"]
+
+# Reasoning effort values accepted by the OpenAI family of APIs. "" means
+# "do not send the parameter at all" — the only safe default, because
+# relays that do not implement it reject the whole request.
+REASONING_EFFORTS: tuple[str, ...] = ("", "minimal", "low", "medium", "high")
+
+# Cached /models result for the settings catalog. Bounded so a provider
+# exposing thousands of ids (Qwen, OpenRouter) cannot bloat the config file.
+MODEL_OPTIONS_MAX = 500
+# Upper bound on the hand-curated candidate list per provider.
+MODEL_CANDIDATES_MAX = 50
+
+
+def _auto_pick(profile: LlmProfile) -> str:
+    """First candidate that does not look like a reasoning model."""
+    candidates = [m for m in profile.models if m and not is_sentinel_model(m)]
+    if not candidates:
+        return ""
+    for name in candidates:
+        if not likely_reasoning_model(name):
+            return name
+    return candidates[0]
+
+
+def resolve_model(profile: LlmProfile, *, vision_mode: bool = False) -> str:
+    """Concrete model id to send for this request.
+
+    - ``__vision__``  → the image model (dedicated vision model or auto)
+    - ``__auto__``    → a non-reasoning candidate, because reasoning models
+      leak chain-of-thought and are slow and expensive for translation
+    - anything else   → that id, verbatim
+
+    ``vision_mode`` only matters when the selection is auto/empty: an image
+    request then prefers the dedicated vision model if one is configured.
+    """
+    model = (profile.model or "").strip()
+    if model == MODEL_VISION:
+        return profile.vision_model_effective
+    if model and model != MODEL_AUTO:
+        return model
+    dedicated = profile.vision_model
+    if vision_mode and dedicated and not is_sentinel_model(dedicated):
+        return dedicated
+    return _auto_pick(profile) or profile.vision_model_effective or model
+
+
+def sanitize_model_options(raw: Any) -> list[str]:
+    """Normalize the cached model id list: strings only, unique, bounded."""
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw[:MODEL_OPTIONS_MAX]:
+        name = str(item).strip()
+        if name and name not in seen:
+            seen.add(name)
+            out.append(name)
+    return out
+
+
+def sanitize_reasoning_effort(raw: Any) -> str:
+    """Coerce an effort value to the supported set; unknown → "" (unset)."""
+    value = str(raw or "").strip().lower()
+    return value if value in REASONING_EFFORTS else ""
+
+
+def sanitize_model_candidates(raw: Any, current: str = "") -> list[str]:
+    """Normalize a provider's curated model list.
+
+    Strips, de-duplicates (case-sensitively, ids are), drops empties, and
+    guarantees the currently selected model is present so the UI can never
+    end up showing a model that has vanished from its own list.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    if isinstance(raw, list):
+        for item in raw[:MODEL_CANDIDATES_MAX]:
+            name = str(item).strip()
+            if name and name not in seen:
+                seen.add(name)
+                out.append(name)
+    current = str(current or "").strip()
+    if current and current not in seen:
+        out.insert(0, current)
+    return out
 
 
 @dataclass
@@ -24,11 +133,68 @@ class LlmProfile:
     # chat_completions: /v1/chat/completions
     # responses:        /v1/responses  (OpenAI Responses API / 多数中转站)
     api_protocol: ApiProtocol = "chat_completions"
+    # Currently selected model. The list it is chosen from is
+    # ``models`` — hand-curated per provider, not the provider's full catalog.
     model: str = "gpt-4o-mini"
-    vision_model: str = "gpt-4o-mini"
+    models: list[str] = field(default_factory=lambda: ["gpt-4o-mini"])
+    # Optional dedicated model for the Vision image mode. Empty = use
+    # ``model``: most current models see images natively, so this is only an
+    # opt-in fallback for providers without vision on their text model.
+    vision_model: str = ""
     temperature: float = 0.2
     timeout_s: float = 60.0
     max_tokens: int = 4096
+    # Reasoning strength sent with every request (see REASONING_EFFORTS).
+    # Empty = parameter omitted, which keeps non-reasoning relays happy.
+    reasoning_effort: str = ""
+    # Last successful GET {base_url}/models result: the pool the settings
+    # dialog picks candidates from. Never shown directly in the main window.
+    model_options: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.reasoning_effort = sanitize_reasoning_effort(self.reasoning_effort)
+        self.model_options = sanitize_model_options(self.model_options)
+        self.model = str(self.model or "").strip()
+        self.vision_model = str(self.vision_model or "").strip()
+        self.models = sanitize_model_candidates(self.models, self.model)
+        if not self.model:
+            self.model = self.models[0] if self.models else "gpt-4o-mini"
+
+    @property
+    def model_count(self) -> int:
+        return len(self.models)
+
+    @property
+    def vision_model_effective(self) -> str:
+        """Model actually used for image translation in Vision mode.
+
+        Never returns a sentinel: with no dedicated vision model the image
+        path follows the auto/text pick like any other request.
+        """
+        vision = (self.vision_model or "").strip()
+        if vision and not is_sentinel_model(vision):
+            return vision
+        return _auto_pick(self) or MODEL_AUTO
+
+    def add_model(self, name: str) -> bool:
+        """Append a candidate model; returns False if blank or duplicate."""
+        name = str(name or "").strip()
+        if not name or name in self.models or len(self.models) >= MODEL_CANDIDATES_MAX:
+            return False
+        self.models.append(name)
+        return True
+
+    def remove_model(self, name: str) -> bool:
+        """Remove a candidate. Removing the selected one falls back to the
+        first remaining candidate; the list never becomes empty."""
+        if name not in self.models or len(self.models) <= 1:
+            return False
+        self.models.remove(name)
+        if self.model == name:
+            self.model = self.models[0]
+        if self.vision_model == name:
+            self.vision_model = ""
+        return True
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> LlmProfile:
@@ -37,7 +203,27 @@ class LlmProfile:
         proto = kwargs.get("api_protocol", "chat_completions")
         if proto not in ("chat_completions", "responses"):
             kwargs["api_protocol"] = "chat_completions"
+        kwargs["reasoning_effort"] = sanitize_reasoning_effort(
+            kwargs.get("reasoning_effort")
+        )
+        kwargs["model_options"] = sanitize_model_options(kwargs.get("model_options"))
+
+        # ── migration from the single-model schema ──
+        # older configs have `model` but no `models`; the old `vision_model`
+        # was always a full model id that defaulted to `model`.
+        model = str(kwargs.get("model", "") or "").strip()
+        if "models" not in kwargs:
+            kwargs["models"] = [model] if model else []
+        if "vision_model" not in kwargs:
+            # Legacy default: vision_model mirrored model. Only carry it over
+            # when it differed (an explicit choice); otherwise leave empty so
+            # the model follows `model` automatically.
+            kwargs["vision_model"] = ""
+        vision = str(kwargs.get("vision_model", "") or "").strip()
+        if vision and model and vision == model:
+            kwargs["vision_model"] = ""
         return cls(**kwargs)
+
 
 
 CUSTOM_SCENES_MAX = 20

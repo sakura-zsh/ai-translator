@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 
-from app.config.schema import LlmProfile
+from app.config.schema import LlmProfile, resolve_model
 from app.core.imaging import sniff_image_mime
 
 log = logging.getLogger(__name__)
@@ -86,10 +86,16 @@ class ApiError(LlmError):
 class LlmClient:
     def __init__(self, profile: LlmProfile) -> None:
         self.profile = profile
+        # Non-fatal notes for the caller (e.g. "relay ignored effort").
+        self.warnings: list[str] = []
 
     @property
     def protocol(self) -> str:
         return getattr(self.profile, "api_protocol", None) or "chat_completions"
+
+    @property
+    def reasoning_effort(self) -> str:
+        return str(getattr(self.profile, "reasoning_effort", "") or "").strip()
 
     def _api_base(self) -> str:
         """Base URL without any endpoint suffix the user may have pasted."""
@@ -126,7 +132,7 @@ class LlmClient:
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> str:
-        model_name = model or self.profile.model
+        model_name = model or resolve_model(self.profile)
         temp = self.profile.temperature if temperature is None else temperature
         tokens = self.profile.max_tokens if max_tokens is None else max_tokens
 
@@ -145,7 +151,8 @@ class LlmClient:
                 "max_tokens": tokens,
                 "stream": False,
             }
-        return self._request(body)
+        self._apply_reasoning_effort(body)
+        return self._request_with_effort_fallback(body)
 
     def chat_vision(
         self,
@@ -160,7 +167,7 @@ class LlmClient:
         mime = sniff_image_mime(image_png)
         b64 = base64.b64encode(image_png).decode("ascii")
         data_url = f"data:{mime};base64,{b64}"
-        model_name = model or self.profile.vision_model or self.profile.model
+        model_name = model or resolve_model(self.profile, vision_mode=True)
         temp = self.profile.temperature if temperature is None else temperature
         tokens = self.profile.max_tokens if max_tokens is None else max_tokens
 
@@ -206,7 +213,8 @@ class LlmClient:
                 "max_tokens": tokens,
                 "stream": False,
             }
-        return self._request(body)
+        self._apply_reasoning_effort(body)
+        return self._request_with_effort_fallback(body)
 
     def test_connection(self) -> str:
         """Minimal probe — returns a short reply or raises."""
@@ -362,6 +370,47 @@ class LlmClient:
             else:
                 parts.append(part)
         return parts
+
+    def _apply_reasoning_effort(self, body: dict[str, Any]) -> None:
+        """Attach the reasoning-effort knob in the shape each protocol wants.
+
+        Chat Completions takes a flat ``reasoning_effort``; the Responses API
+        nests it under ``reasoning``. Empty effort → nothing is added, so
+        providers without the parameter keep working unchanged.
+        """
+        effort = self.reasoning_effort
+        if not effort:
+            return
+        if self.protocol == "responses":
+            body["reasoning"] = {"effort": effort}
+        else:
+            body["reasoning_effort"] = effort
+
+    def _request_with_effort_fallback(self, body: dict[str, Any]) -> str:
+        """Send the request; drop the effort knob once if the API rejects it.
+
+        OpenAI-compatible relays vary: some accept ``reasoning_effort``,
+        some return 400 "unsupported parameter". A user-facing setting must
+        never turn into a hard failure, so the request is retried once
+        without the parameter and the degradation is reported upward.
+        """
+        try:
+            return self._request(body)
+        except ApiError as exc:
+            if not self.reasoning_effort or exc.status_code not in (400, 422):
+                raise
+            detail = str(exc).lower()
+            if "reason" not in detail and "effort" not in detail:
+                raise
+            log.warning(
+                "API rejected reasoning_effort (%s); retrying without it",
+                exc.status_code,
+            )
+            stripped = {
+                k: v for k, v in body.items() if k not in ("reasoning_effort", "reasoning")
+            }
+            self.warnings.append("网关不支持推理强度，本次已按默认强度发送")
+            return self._request(stripped)
 
     def _request(self, body: dict[str, Any]) -> str:
         timeout = httpx.Timeout(self.profile.timeout_s)

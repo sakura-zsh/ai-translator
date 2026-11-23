@@ -63,10 +63,16 @@ class FirstRunDialog(QDialog):
 
         self.model_text = ModelSelector(self._applied_profile)
         form.addRow("文本模型", self.model_text)
-        self.model_vision = ModelSelector(self._applied_profile)
-        form.addRow("视觉模型", self.model_vision)
 
         root.addLayout(form)
+
+        vision_hint = QLabel(
+            "图像翻译默认用同一个模型（多数模型已原生支持图片）；"
+            "如需单独指定，可在「设置 → LLM 配置」里设置。"
+        )
+        vision_hint.setObjectName("hintLabel")
+        vision_hint.setWordWrap(True)
+        root.addWidget(vision_hint)
 
         self.hint = QLabel("")
         self.hint.setObjectName("hintLabel")
@@ -106,25 +112,23 @@ class FirstRunDialog(QDialog):
         self._profile.api_protocol = template.api_protocol  # type: ignore[assignment]
         self._profile.name = template.name
         if template.text_model:
+            self._profile.add_model(template.text_model)
             self._profile.model = template.text_model
-        if template.vision_model:
-            self._profile.vision_model = template.vision_model
         self.f_key.setText("")
         self.f_key.setPlaceholderText(
             "无需 API Key" if not template.key_required else "sk-…"
         )
         self.model_text.set_current_text(self._profile.model)
-        self.model_vision.set_current_text(self._profile.vision_model)
         self.hint.setText(template.hint)
         self.test_status.setText("")
 
     def _applied_profile(self) -> LlmProfile:
         """Fold current form values into the profile (for fetch / test)."""
         self._profile.api_key = self.f_key.text().strip()
-        self._profile.model = self.model_text.current_text() or self._profile.model
-        self._profile.vision_model = (
-            self.model_vision.current_text() or self._profile.model
-        )
+        model = self.model_text.current_text()
+        if model:
+            self._profile.add_model(model)
+            self._profile.model = model
         return self._profile
 
     def _on_accept(self) -> None:

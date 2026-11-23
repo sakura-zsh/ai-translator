@@ -10,7 +10,7 @@ import time
 from datetime import datetime
 from typing import Any
 
-from PySide6.QtCore import QByteArray, QEvent, QPoint, Qt, QThreadPool
+from PySide6.QtCore import QByteArray, QEvent, QPoint, QRect, Qt, QThreadPool
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -46,7 +46,12 @@ from PySide6.QtWidgets import (
 )
 
 from app import __version__
-from app.config.schema import TTS_RATE_MIN, AppConfig, HistoryEntry
+from app.config.schema import (
+    TTS_RATE_MIN,
+    AppConfig,
+    HistoryEntry,
+    resolve_model,
+)
 from app.config.store import ConfigStore
 from app.core.clipboard_image import ClipboardImageError, ClipboardImageService
 from app.core.jev_client import JevClient
@@ -74,6 +79,7 @@ from app.core.screenshot import (
 from app.core.translator import TranslateResult, Translator
 from app.core.tts import TextToSpeech, TtsError, TtsPlayer
 from app.ui.history_panel import HistoryPanel
+from app.ui.model_picker import ModelPickerButton, ModelPickerPopup, effort_label, model_display
 from app.ui.settings_dialog import SettingsDialog
 from app.ui.widgets import SourceEdit, apply_theme
 from app.workers.tasks import TaskRunner
@@ -386,6 +392,11 @@ class MainWindow(QMainWindow):
         actions.addWidget(self.btn_paste_img)
         actions.addWidget(self.btn_clear)
         actions.addStretch(1)
+        # Centre of the action bar: quick switch of model + reasoning effort.
+        self.model_picker = ModelPickerButton()
+        self.model_picker.clicked.connect(self._toggle_model_picker)
+        actions.addWidget(self.model_picker)
+        actions.addStretch(1)
         actions.addWidget(self.btn_copy)
         actions.addWidget(self.btn_settings)
         root.addLayout(actions)
@@ -400,6 +411,20 @@ class MainWindow(QMainWindow):
         self.history_panel.entry_selected.connect(self._on_history_selected)
         self.history_panel.copy_requested.connect(self._on_history_copy)
         self.history_panel.clear_requested.connect(self._clear_history)
+
+        # Model / effort picker overlay, anchored above the bottom-bar button.
+        self.model_popup = ModelPickerPopup(
+            central,
+            lambda: self.config.profiles,
+            lambda: self.config.active_profile_id,
+        )
+        self.model_popup.model_selected.connect(self._on_model_selected)
+        self.model_popup.provider_selected.connect(self._on_provider_picked)
+        self.model_popup.effort_selected.connect(self._on_effort_selected)
+        self.model_popup.disabled_changed.connect(self._on_picker_disabled)
+        self.model_popup.settings_requested.connect(self._open_llm_settings)
+        self._refresh_model_picker()
+
         QApplication.instance().installEventFilter(self)  # type: ignore[union-attr]
 
         quit_act = QAction("退出", self)
@@ -553,7 +578,105 @@ class MainWindow(QMainWindow):
             self.config.active_profile_id = pid
             self._save_config()
             profile = self.config.get_active_profile()
-            self._set_status(f"已切换配置：{profile.name} · {profile.model}")
+            self._refresh_model_picker()
+            self._set_status(
+                f"已切换服务商：{profile.name} · {model_display(profile.model)}"
+            )
+
+    # ── Model / reasoning-effort picker ───────────────────────────
+    def _refresh_model_picker(self) -> None:
+        """Sync the bottom-bar button (and an open panel) with the config."""
+        profile = self.config.get_active_profile()
+        self.model_picker.set_summary(
+            model_display(profile.model), profile.reasoning_effort, profile.name
+        )
+        self._sync_profile_combo()
+        if self.model_popup.isVisible():
+            self.model_popup.reload(profile)
+
+    def _sync_profile_combo(self) -> None:
+        """Keep the top toolbar's provider dropdown in step with the picker.
+
+        Rebuilds when the profile set/names changed (settings may have added
+        a provider while the picker was open), otherwise just moves the
+        selection — no signals, so this never re-enters _on_profile_changed.
+        """
+        combo = self.profile_combo
+        wanted = [
+            (p.id, p.name) for p in self.config.profiles
+        ]
+        current = [
+            (combo.itemData(i), combo.itemText(i)) for i in range(combo.count())
+        ]
+        combo.blockSignals(True)
+        if current != wanted:
+            combo.clear()
+            for pid, name in wanted:
+                combo.addItem(name, pid)
+        idx = combo.findData(self.config.active_profile_id)
+        if idx >= 0 and idx != combo.currentIndex():
+            combo.setCurrentIndex(idx)
+        combo.blockSignals(False)
+
+    def _picker_anchor(self) -> QRect:
+        """Button geometry in central-widget coordinates."""
+        central = self.centralWidget()
+        top_left = self.model_picker.mapTo(central, QPoint(0, 0))
+        return QRect(top_left, self.model_picker.size())
+
+    def _toggle_model_picker(self) -> None:
+        if self._busy:
+            return
+        if self.model_popup.isVisible():
+            self.model_popup.hide_panel()
+            return
+        self.model_popup.reload(self.config.get_active_profile())
+        self.model_popup.show_above(self._picker_anchor())
+
+    def _on_model_selected(self, profile_id: str, model: str) -> None:
+        """Switch provider and model in one step (rows carry both)."""
+        profile = self.config.get_profile(profile_id)
+        if profile is None:
+            return
+        chosen = (model or "").strip()
+        if not chosen:
+            return
+        switched_provider = self.config.active_profile_id != profile_id
+        self.config.active_profile_id = profile_id
+        profile.model = chosen
+        self._save_config()
+        self._refresh_model_picker()
+        prefix = f"已切换服务商：{profile.name} · " if switched_provider else ""
+        self._set_status(f"{prefix}模型：{model_display(chosen)}")
+
+    def _on_provider_picked(self, profile_id: str) -> None:
+        """Provider switched from the picker header — model stays as it was
+        for that provider (each profile keeps its own `model`)."""
+        profile = self.config.get_profile(profile_id)
+        if profile is None:
+            return
+        self.config.active_profile_id = profile_id
+        self._save_config()
+        self._refresh_model_picker()
+        self._set_status(
+            f"已切换服务商：{profile.name} · {model_display(profile.model)}"
+        )
+
+    def _on_picker_disabled(self, disabled: bool) -> None:
+        if not disabled:
+            return
+        profile = self.config.get_active_profile()
+        self._set_status(f"{profile.name} 还没有候选模型，点面板底部的「管理候选模型…」")
+
+    def _on_effort_selected(self, effort: str) -> None:
+        profile = self.config.get_active_profile()
+        profile.reasoning_effort = (effort or "").strip().lower()
+        self._save_config()
+        self._refresh_model_picker()
+        if profile.reasoning_effort:
+            self._set_status(f"推理强度：{effort_label(profile.reasoning_effort)}")
+        else:
+            self._set_status("推理强度：不指定（请求不带该参数）")
 
     def _on_scene_changed(self, _index: int) -> None:
         sid = self.scene_combo.currentData()
@@ -567,9 +690,20 @@ class MainWindow(QMainWindow):
                 self._set_status(f"场景：{label}")
 
     def _open_settings(self) -> None:
+        self._show_settings()
+
+    def _open_llm_settings(self, profile_id: str = "") -> None:
+        """Jump straight to 设置 → LLM 配置 (from the picker's link row)."""
+        self._show_settings(profile_id=profile_id, tab=0)
+
+    def _show_settings(self, profile_id: str = "", tab: int = -1) -> None:
         self._persist()
         self._save_config()
         dlg = SettingsDialog(self.config, self)
+        if profile_id:
+            dlg.select_profile(profile_id)
+        if tab >= 0:
+            dlg.show_tab(tab)
         if dlg.exec() != SettingsDialog.DialogCode.Accepted:
             return
         self.config = dlg.result_config()
@@ -584,6 +718,7 @@ class MainWindow(QMainWindow):
         self._rebuild_translator()
         self._reload_profiles()
         self._apply_translation_defaults()
+        self._refresh_model_picker()
         self._refresh_speak_icons()
         self._install_hotkeys()
         if sys.platform == "win32":
@@ -699,8 +834,13 @@ class MainWindow(QMainWindow):
             self.btn_settings,
             self.profile_combo,
             self.scene_combo,
+            self.model_picker,
         ):
             w.setEnabled(not busy)
+        if busy:
+            # The picker writes into the profile a request is already using —
+            # closing it avoids "I changed the model but nothing happened".
+            self.model_popup.hide_panel()
         if message:
             self._set_status(message)
 
@@ -777,7 +917,7 @@ class MainWindow(QMainWindow):
         target = self.target_combo.currentData() or "zh"
         glossary = self.config.translation.glossary or None
 
-        self._set_busy(True, f"翻译中… · {profile.model}")
+        self._set_busy(True, f"翻译中… · {model_display(profile.model)}")
         started = time.perf_counter()
 
         def work() -> dict[str, Any]:
@@ -836,9 +976,13 @@ class MainWindow(QMainWindow):
             jev_bit += " · " + " · ".join(str(n) for n in notes)
         if isinstance(score, (int, float)):
             jev_bit += f" · 质量 {float(score):.2f}"
+        for warning in getattr(result, "warnings", []) or []:
+            jev_bit += f" · {warning}"
+        effort = self.config.get_active_profile().reasoning_effort
+        effort_bit = f" · 推理 {effort_label(effort)}" if effort else ""
 
         self._set_status(
-            f"完成 · mode={result.mode} · model={result.model} · {elapsed:.2f}s"
+            f"完成 · mode={result.mode} · model={result.model}{effort_bit} · {elapsed:.2f}s"
             f"{copied}{jev_bit}"
         )
 
@@ -932,23 +1076,27 @@ class MainWindow(QMainWindow):
         self._set_status("历史已清空")
 
     def eventFilter(self, obj, event):  # noqa: N802
-        # Click outside the floating panel → close it
-        if (
-            event.type() == QEvent.Type.MouseButtonPress
-            and self.history_panel.isVisible()
-        ):
+        # Click outside the floating panels → close them
+        if event.type() == QEvent.Type.MouseButtonPress:
             pos = event.globalPosition().toPoint()  # type: ignore[attr-defined]
-            panel_rect = self.history_panel.rect()
-            panel_global_topleft = self.history_panel.mapToGlobal(QPoint(0, 0))
-            panel_rect.moveTopLeft(panel_global_topleft)
-            btn_rect = self.btn_history.rect()
-            btn_rect.moveTopLeft(self.btn_history.mapToGlobal(QPoint(0, 0)))
-            if not panel_rect.contains(pos) and not btn_rect.contains(pos):
-                self.history_panel.hide_panel()
+            if self.model_popup.isVisible() and self.model_popup.hides_click_at(
+                pos, self._picker_anchor()
+            ):
+                self.model_popup.hide_panel()
+            if self.history_panel.isVisible():
+                panel_rect = self.history_panel.rect()
+                panel_global_topleft = self.history_panel.mapToGlobal(QPoint(0, 0))
+                panel_rect.moveTopLeft(panel_global_topleft)
+                btn_rect = self.btn_history.rect()
+                btn_rect.moveTopLeft(self.btn_history.mapToGlobal(QPoint(0, 0)))
+                if not panel_rect.contains(pos) and not btn_rect.contains(pos):
+                    self.history_panel.hide_panel()
         return super().eventFilter(obj, event)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
+        # Anchored overlays cannot stay in place across a resize.
+        self.model_popup.hide_panel()
         if self.history_panel.isVisible():
             br = self.btn_history.mapToGlobal(
                 QPoint(self.btn_history.width(), self.btn_history.height())
@@ -999,7 +1147,11 @@ class MainWindow(QMainWindow):
             )
             return
 
-        label = profile.vision_model if mode == "vision" else profile.model
+        label = (
+            resolve_model(profile, vision_mode=True)
+            if mode == "vision"
+            else resolve_model(profile)
+        )
         self._set_busy(True, f"图片翻译中（{mode}）… · {label}")
         started = time.perf_counter()
 

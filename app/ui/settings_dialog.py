@@ -53,7 +53,8 @@ from app.core.presets import (
 )
 from app.core.providers import PROVIDER_TEMPLATES, ProviderTemplate, get_template
 from app.core.tts import TextToSpeech, TtsPlayer
-from app.ui.widgets import ModelSelector
+from app.ui.model_catalog import ModelCatalogDialog
+from app.ui.model_editor import CandidateModelEditor, sentinel_rows
 from app.workers.tasks import TaskRunner
 
 # Curated edge-tts voices; arbitrary voice ids can be pasted into the combo.
@@ -217,11 +218,11 @@ class SettingsDialog(QDialog):
     def __init__(self, config: AppConfig, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("设置")
-        # +40px headroom: the two ModelSelector status lines are always
-        # reserved now so fetching models never squeezes the combo boxes;
-        # +50px more for the scene/glossary rows on the translation tab;
-        # +40px more for the TTS rows (voice/rate/auto/preview).
-        self.setMinimumSize(640, 660)
+        # +40px headroom: the candidate list and the status hints underneath
+        # would otherwise squeeze the form rows; +50px more for the
+        # scene/glossary rows on the translation tab; +40px more for the TTS
+        # rows (voice/rate/auto/preview).
+        self.setMinimumSize(680, 720)
         self._config = deepcopy(config)
         self._pool = QThreadPool.globalInstance()
         self._runner = TaskRunner(self._pool, parent=self)
@@ -274,6 +275,10 @@ class SettingsDialog(QDialog):
 
         form_box = QGroupBox("配置详情")
         form = QFormLayout(form_box)
+        # FixAtCurrentSize keeps tall widgets (the candidate list) at their
+        # sizeHint instead of letting the form squeeze every row to fit.
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
         self.f_name = QLineEdit()
         self.f_base_url = QLineEdit()
         self.f_base_url.setPlaceholderText("https://api.openai.com/v1")
@@ -292,10 +297,21 @@ class SettingsDialog(QDialog):
         for t in PROVIDER_TEMPLATES:
             self.f_template.addItem(t.name, t.id)
         self.f_template.setToolTip(
-            "选择常用服务商可自动填入地址与推荐模型；随后用「获取模型」拉取真实列表。"
+            "选择常用服务商可自动填入地址与推荐模型；随后用「从服务商列表…」挑候选。"
         )
-        self.model_text = ModelSelector(lambda: self._profile_for_fetch())
-        self.model_vision = ModelSelector(lambda: self._profile_for_fetch())
+        # Candidate list (hand-curated per provider) + vision fallback.
+        self.model_editor = CandidateModelEditor()
+        self.model_editor.changed.connect(self._apply_form_to_current)
+        self.model_editor.list_changed.connect(self._refresh_vision_rows)
+        self.model_editor.catalog_requested.connect(self._open_model_catalog)
+        self.vision_combo = QComboBox()
+        self.vision_combo.setToolTip(
+            "大多数模型已原生支持图片，默认「跟随当前模型」。\n"
+            "只有当服务商的文本模型不支持图片时，才在这里指定专用视觉模型。"
+        )
+        self.vision_combo.currentIndexChanged.connect(
+            lambda _i: self._on_vision_changed()
+        )
         self.f_temperature = QDoubleSpinBox()
         self.f_temperature.setRange(0.0, 2.0)
         self.f_temperature.setSingleStep(0.1)
@@ -312,8 +328,8 @@ class SettingsDialog(QDialog):
         form.addRow("Base URL", self.f_base_url)
         form.addRow("API Key", self.f_api_key)
         form.addRow("API 协议", self.f_protocol)
-        form.addRow("文本模型", self.model_text)
-        form.addRow("视觉模型", self.model_vision)
+        form.addRow("候选模型", self.model_editor)  # tall: see sizeHint
+        form.addRow("视觉模型", self.vision_combo)
         form.addRow("Temperature", self.f_temperature)
         form.addRow("超时", self.f_timeout)
         form.addRow("Max tokens", self.f_max_tokens)
@@ -325,8 +341,6 @@ class SettingsDialog(QDialog):
         ):
             w.editingFinished.connect(self._apply_form_to_current)
         self.f_protocol.currentIndexChanged.connect(lambda _i: self._apply_form_to_current())
-        self.model_text.combo.currentTextChanged.connect(lambda _t: self._apply_form_to_current())
-        self.model_vision.combo.currentTextChanged.connect(lambda _t: self._apply_form_to_current())
         self.f_temperature.valueChanged.connect(lambda _v: self._apply_form_to_current())
         self.f_timeout.valueChanged.connect(lambda _v: self._apply_form_to_current())
         self.f_max_tokens.valueChanged.connect(lambda _v: self._apply_form_to_current())
@@ -345,6 +359,19 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(form_box, 2)
         self.tabs.addTab(page, "LLM 配置")
+
+    # ── public helpers (used by the bottom-bar picker) ────────────
+    def select_profile(self, profile_id: str) -> None:
+        """Focus a provider by id; silently keeps the current one if gone."""
+        for row in range(self.profile_list.count()):
+            item = self.profile_list.item(row)
+            if item.data(Qt.ItemDataRole.UserRole) == profile_id:
+                self.profile_list.setCurrentRow(row)
+                return
+
+    def show_tab(self, index: int) -> None:
+        if 0 <= index < self.tabs.count():
+            self.tabs.setCurrentIndex(index)
 
     def _reload_profile_list(self, select_id: str | None = None) -> None:
         self.profile_list.blockSignals(True)
@@ -380,12 +407,6 @@ class SettingsDialog(QDialog):
                 prev_profile.api_protocol = (
                     self.f_protocol.currentData() or "chat_completions"
                 )
-                prev_profile.model = (
-                    self.model_text.current_text() or prev_profile.model
-                )
-                prev_profile.vision_model = (
-                    self.model_vision.current_text() or prev_profile.model
-                )
                 prev_profile.temperature = float(self.f_temperature.value())
                 prev_profile.timeout_s = float(self.f_timeout.value())
                 prev_profile.max_tokens = int(self.f_max_tokens.value())
@@ -396,6 +417,7 @@ class SettingsDialog(QDialog):
 
     def _fill_form(self, profile: LlmProfile | None) -> None:
         if profile is None:
+            self.model_editor.set_profile(None)
             return
         widgets = [
             self.f_name,
@@ -408,24 +430,66 @@ class SettingsDialog(QDialog):
         ]
         for w in widgets:
             w.blockSignals(True)
-        for sel in (self.model_text, self.model_vision):
-            sel.combo.blockSignals(True)
         self.f_name.setText(profile.name)
         self.f_base_url.setText(profile.base_url)
         self.f_api_key.setText(profile.api_key)
         idx = self.f_protocol.findData(profile.api_protocol or "chat_completions")
         self.f_protocol.setCurrentIndex(max(0, idx))
-        self.model_text.set_current_text(profile.model)
-        self.model_vision.set_current_text(profile.vision_model)
         self.f_temperature.setValue(profile.temperature)
         self.f_timeout.setValue(profile.timeout_s)
         self.f_max_tokens.setValue(profile.max_tokens)
-        for sel in (self.model_text, self.model_vision):
-            sel.combo.blockSignals(False)
         for w in widgets:
             w.blockSignals(False)
+        self.model_editor.set_profile(profile)
+        self._reload_vision_combo(profile)
         self._reset_template_combo()
         self.test_status.setText("")
+
+    def _reload_vision_combo(self, profile: LlmProfile) -> None:
+        combo = self.vision_combo
+        combo.blockSignals(True)
+        combo.clear()
+        for value, label in sentinel_rows(profile):
+            combo.addItem(label, value)
+        idx = combo.findData(profile.vision_model or "")
+        if idx < 0:
+            # A vision model that is no longer a candidate: keep it visible
+            # instead of silently dropping the user's choice.
+            combo.addItem(profile.vision_model, profile.vision_model)
+            idx = combo.count() - 1
+        combo.setCurrentIndex(idx)
+        combo.blockSignals(False)
+
+    def _refresh_vision_rows(self) -> None:
+        """Candidate list changed → the vision combo must follow."""
+        profile = self._current_profile()
+        if profile is not None:
+            self._reload_vision_combo(profile)
+
+    def _on_vision_changed(self) -> None:
+        profile = self._current_profile()
+        if profile is None:
+            return
+        profile.vision_model = str(self.vision_combo.currentData() or "")
+        self.model_editor.reload()
+        item = self.profile_list.currentItem()
+        if item is not None:
+            item.setText(profile.name)
+
+    def _open_model_catalog(self) -> None:
+        """Pull /models and let the user tick the ones to keep."""
+        self._apply_form_to_current()
+        profile = self._current_profile()
+        if profile is None:
+            return
+        dlg = ModelCatalogDialog(
+            self._profile_for_fetch, list(profile.models), self
+        )
+        dlg.set_models(list(profile.model_options))
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        chosen = dlg.checked_models()
+        self.model_editor.add_models(chosen)
 
     def _apply_form_to_current(self) -> None:
         profile = self._current_profile()
@@ -435,11 +499,12 @@ class SettingsDialog(QDialog):
         profile.base_url = self.f_base_url.text().strip() or profile.base_url
         profile.api_key = self.f_api_key.text()
         profile.api_protocol = self.f_protocol.currentData() or "chat_completions"
-        profile.model = self.model_text.current_text() or profile.model
-        profile.vision_model = self.model_vision.current_text() or profile.model
         profile.temperature = float(self.f_temperature.value())
         profile.timeout_s = float(self.f_timeout.value())
         profile.max_tokens = int(self.f_max_tokens.value())
+        # ``models`` / ``model`` / ``vision_model`` are mutated in place by
+        # CandidateModelEditor and the vision combo, which re-sanitises via
+        # LlmProfile helpers on every add/remove.
         item = self.profile_list.currentItem()
         if item:
             item.setText(profile.name)
@@ -469,8 +534,10 @@ class SettingsDialog(QDialog):
         profile.api_protocol = template.api_protocol  # type: ignore[assignment]
         profile.name = template.name
         if template.text_model:
+            profile.add_model(template.text_model)
             profile.model = template.text_model
-        if template.vision_model:
+        if template.vision_model and template.vision_model != template.text_model:
+            profile.add_model(template.vision_model)
             profile.vision_model = template.vision_model
         self._fill_form(profile)
         item = self.profile_list.currentItem()

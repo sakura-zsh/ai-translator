@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
-from app.config.schema import LlmProfile
+from app.config.schema import LlmProfile, resolve_model
 from app.core.imaging import downscale_for_vision
 from app.core.llm_client import LlmClient
 from app.core.ocr import OcrService
@@ -20,6 +20,9 @@ class TranslateResult:
     ocr_text: str | None = None
     model: str = ""
     mode: str = "text"
+    # Non-fatal notes from the API layer (e.g. "relay ignored reasoning
+    # effort"). Surfaced in the status bar, never treated as an error.
+    warnings: list[str] = field(default_factory=list)
 
 
 class Translator:
@@ -52,9 +55,17 @@ class Translator:
             [
                 {"role": "system", "content": system},
                 {"role": "user", "content": cleaned},
-            ]
+            ],
+            # ``model`` may be a sentinel (auto / vision) — resolve it to a
+            # concrete id here so LlmClient only ever talks to real models.
+            model=resolve_model(profile),
         )
-        return TranslateResult(text=out, model=profile.model, mode="text")
+        return TranslateResult(
+            text=out,
+            model=resolve_model(profile),
+            mode="text",
+            warnings=list(client.warnings),
+        )
 
     def translate_image(
         self,
@@ -95,11 +106,16 @@ class Translator:
             glossary=glossary,
         )
         client = LlmClient(profile)
-        model = profile.vision_model or profile.model
+        model = resolve_model(profile, vision_mode=True)
         out = client.chat_vision(
             system,
             "Translate the text visible in this image.",
             downscale_for_vision(image_png),
             model=model,
         )
-        return TranslateResult(text=out, model=model, mode="vision")
+        return TranslateResult(
+            text=out,
+            model=model,
+            mode="vision",
+            warnings=list(client.warnings),
+        )

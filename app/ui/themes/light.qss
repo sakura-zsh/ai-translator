@@ -297,3 +297,153 @@ QScrollArea#historyScroll {
 QScrollArea#historyScroll > QWidget > QWidget {
     background: transparent;
 }
+
+/* ── Bottom-bar model / reasoning-effort picker ───────────────── */
+QPushButton#modelPickerButton {
+    background-color: #ffffff;
+    border: 1px solid #ccd0da;
+    border-radius: 8px;
+    padding: 6px 12px;
+    color: #4c4f69;
+}
+QPushButton#modelPickerButton:hover { background-color: #e6e9ef; }
+QPushButton#modelPickerButton:pressed { background-color: #dce0e8; }
+QPushButton#modelPickerButton:disabled { color: #9ca0b0; border-color: #e6e9ef; }
+
+QFrame#modelPickerPanel {
+    background-color: #ffffff;
+    border: 1px solid #ccd0da;
+    border-radius: 12px;
+}
+QLabel#modelPickerCaption {
+    background: transparent;
+    color: #9ca0b0;
+    font-size: 11px;
+    font-weight: 600;
+}
+QLabel#modelPickerEffortValue {
+    background: transparent;
+    color: #4c4f69;
+    font-size: 13px;
+    font-weight: 600;
+}
+QLabel#modelPickerStatus {
+    background: transparent;
+    color: #9ca0b0;
+    font-size: 12px;
+}
+QFrame#modelPickerSeparator { background-color: #e6e9ef; border: none; }
+
+QListWidget#modelPickerList {
+    background: transparent;
+    border: none;
+    padding: 0;
+}
+QListWidget#modelPickerList::item {
+    padding: 7px 8px;
+    border-radius: 6px;
+}
+QListWidget#modelPickerList::item:hover { background-color: #e6e9ef; }
+QListWidget#modelPickerList::item:selected {
+    background-color: #dce0e8;
+    color: #4c4f69;
+}
+
+QSlider#modelPickerSlider { background: transparent; }
+QSlider#modelPickerSlider::groove:horizontal {
+    height: 4px;
+    background: #ccd0da;
+    border-radius: 2px;
+}
+QSlider#modelPickerSlider::sub-page:horizontal {
+    background: #1e66f5;
+    border-radius: 2px;
+}
+QSlider#modelPickerSlider::handle:horizontal {
+    width: 16px;
+    margin: -7px 0;
+    border-radius: 8px;
+    background: #ffffff;
+    border: 1px solid #1e66f5;
+}
+
+/* ── Candidate model editor / picker tabs ─────────────────── */
+QListWidget#candidateTree {
+    background-color: #ffffff;
+    border: 1px solid #ccd0da;
+    border-radius: 8px;
+    padding: 2px;
+    outline: 0;
+}
+QListWidget#candidateTree::item {
+    padding: 5px 6px;
+    border-radius: 6px;
+}
+QListWidget#candidateTree::item:selected {
+    background-color: #dce0e8;
+    color: #4c4f69;
+}
+QListWidget#candidateTree::item:hover { background-color: #e6e9ef; }
+
+QPushButton#pickerTab {
+    background-color: #e6e9ef;
+    border: 1px solid #ccd0da;
+    border-radius: 7px;
+    padding: 4px 12px;
+    color: #6c6f85;
+}
+QPushButton#pickerTab:checked {
+    background-color: #1e66f5;
+    border-color: #1e66f5;
+    color: #ffffff;
+    font-weight: 600;
+}
+
+/* Picker header: the provider name doubles as the dropdown toggle. */
+QFrame#modelPickerHeader {
+    background-color: #f2f4f8;
+    border: 1px solid #e6e9ef;
+    border-radius: 9px;
+}
+QPushButton#modelPickerProvider {
+    background: transparent;
+    border: none;
+    padding: 0 4px;
+    text-align: left;
+    color: #4c4f69;
+    font-size: 14px;
+    font-weight: 600;
+}
+QPushButton#modelPickerProvider:hover { color: #1e66f5; }
+QPushButton#modelPickerProvider[expanded="true"] { color: #1e66f5; }
+QLabel#modelPickerChevron {
+    background: transparent;
+    color: #9ca0b0;
+    font-size: 11px;
+}
+QFrame#modelPickerProviders {
+    background-color: #f7f8fa;
+    border: 1px solid #e6e9ef;
+    border-radius: 9px;
+}
+QListWidget#modelPickerProviderList {
+    background: transparent;
+    border: none;
+    padding: 0;
+    outline: 0;
+}
+QListWidget#modelPickerProviderList::item {
+    padding: 4px 8px;
+    border-radius: 6px;
+}
+QListWidget#modelPickerProviderList::item:hover { background-color: #e6e9ef; }
+QListWidget#modelPickerProviderList::item:selected { background-color: #dce0e8; }
+QPushButton#pickerLink {
+    background: transparent;
+    border: none;
+    padding: 2px 0;
+    color: #1e66f5;
+    font-size: 12px;
+    text-align: left;
+}
+QPushButton#pickerLink:hover { color: #04a5e5; text-decoration: underline; }

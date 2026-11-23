@@ -297,3 +297,156 @@ QScrollArea#historyScroll {
 QScrollArea#historyScroll > QWidget > QWidget {
     background: transparent;
 }
+
+/* ── Bottom-bar model / reasoning-effort picker ───────────────── */
+QPushButton#modelPickerButton {
+    background-color: #313244;
+    border: 1px solid #45475a;
+    border-radius: 8px;
+    padding: 6px 12px;
+    color: #cdd6f4;
+}
+QPushButton#modelPickerButton:hover { background-color: #45475a; }
+QPushButton#modelPickerButton:pressed { background-color: #585b70; }
+QPushButton#modelPickerButton:disabled {
+    color: #6c7086;
+    border-color: #313244;
+}
+
+QFrame#modelPickerPanel {
+    background-color: #181825;
+    border: 1px solid #585b70;
+    border-radius: 12px;
+}
+QLabel#modelPickerCaption {
+    background: transparent;
+    color: #6c7086;
+    font-size: 11px;
+    font-weight: 600;
+}
+QLabel#modelPickerEffortValue {
+    background: transparent;
+    color: #cdd6f4;
+    font-size: 13px;
+    font-weight: 600;
+}
+QLabel#modelPickerStatus {
+    background: transparent;
+    color: #6c7086;
+    font-size: 12px;
+}
+QFrame#modelPickerSeparator { background-color: #313244; border: none; }
+
+QListWidget#modelPickerList {
+    background: transparent;
+    border: none;
+    padding: 0;
+}
+QListWidget#modelPickerList::item {
+    padding: 7px 8px;
+    border-radius: 6px;
+}
+QListWidget#modelPickerList::item:hover { background-color: #313244; }
+QListWidget#modelPickerList::item:selected {
+    background-color: #45475a;
+    color: #cdd6f4;
+}
+
+QSlider#modelPickerSlider { background: transparent; }
+QSlider#modelPickerSlider::groove:horizontal {
+    height: 4px;
+    background: #45475a;
+    border-radius: 2px;
+}
+QSlider#modelPickerSlider::sub-page:horizontal {
+    background: #89b4fa;
+    border-radius: 2px;
+}
+QSlider#modelPickerSlider::handle:horizontal {
+    width: 16px;
+    margin: -7px 0;
+    border-radius: 8px;
+    background: #1e1e2e;
+    border: 1px solid #89b4fa;
+}
+
+/* ── Candidate model editor / picker tabs ─────────────────── */
+QListWidget#candidateTree {
+    background-color: #181825;
+    border: 1px solid #45475a;
+    border-radius: 8px;
+    padding: 2px;
+    outline: 0;
+}
+QListWidget#candidateTree::item {
+    padding: 5px 6px;
+    border-radius: 6px;
+}
+QListWidget#candidateTree::item:selected {
+    background-color: #45475a;
+    color: #cdd6f4;
+}
+QListWidget#candidateTree::item:hover { background-color: #313244; }
+
+QPushButton#pickerTab {
+    background-color: #313244;
+    border: 1px solid #45475a;
+    border-radius: 7px;
+    padding: 4px 12px;
+    color: #a6adc8;
+}
+QPushButton#pickerTab:checked {
+    background-color: #89b4fa;
+    border-color: #89b4fa;
+    color: #11111b;
+    font-weight: 600;
+}
+
+/* Picker header: the provider name doubles as the dropdown toggle. */
+QFrame#modelPickerHeader {
+    background-color: #1e1e2e;
+    border: 1px solid #313244;
+    border-radius: 9px;
+}
+QPushButton#modelPickerProvider {
+    background: transparent;
+    border: none;
+    padding: 0 4px;
+    text-align: left;
+    color: #cdd6f4;
+    font-size: 14px;
+    font-weight: 600;
+}
+QPushButton#modelPickerProvider:hover { color: #89b4fa; }
+QPushButton#modelPickerProvider[expanded="true"] { color: #89b4fa; }
+QLabel#modelPickerChevron {
+    background: transparent;
+    color: #6c7086;
+    font-size: 11px;
+}
+QFrame#modelPickerProviders {
+    background-color: #11111b;
+    border: 1px solid #313244;
+    border-radius: 9px;
+}
+QListWidget#modelPickerProviderList {
+    background: transparent;
+    border: none;
+    padding: 0;
+    outline: 0;
+}
+QListWidget#modelPickerProviderList::item {
+    padding: 4px 8px;
+    border-radius: 6px;
+}
+QListWidget#modelPickerProviderList::item:hover { background-color: #313244; }
+QListWidget#modelPickerProviderList::item:selected { background-color: #45475a; }
+QPushButton#pickerLink {
+    background: transparent;
+    border: none;
+    padding: 2px 0;
+    color: #89b4fa;
+    font-size: 12px;
+    text-align: left;
+}
+QPushButton#pickerLink:hover { color: #74c7ec; text-decoration: underline; }
