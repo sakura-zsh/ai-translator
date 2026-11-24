@@ -43,16 +43,25 @@ from app.config.schema import MODEL_AUTO, MODEL_VISION
 
 log = logging.getLogger(__name__)
 
-# (value sent to the API, Chinese label). "" = do not send the parameter:
-# relays that do not implement it reject the whole request, so the neutral
-# default must be "give the provider nothing extra".
+# (value sent to the API, visible label). Labels intentionally use the
+# canonical OpenAI-style effort names so what the user sees is exactly what
+# goes into ``reasoning_effort``. "" = do not send the parameter: relays that
+# do not implement it reject the whole request, so the neutral default must
+# be "give the provider nothing extra".
 EFFORT_CHOICES: tuple[tuple[str, str], ...] = (
-    ("", "不指定"),
-    ("minimal", "极简"),
-    ("low", "轻量"),
-    ("medium", "标准"),
-    ("high", "深入"),
+    ("", "默认"),
+    ("minimal", "minimal"),
+    ("low", "low"),
+    ("medium", "medium"),
+    ("high", "high"),
 )
+_EFFORT_HELP = {
+    "": "默认：不发送 reasoning_effort，兼容所有接口",
+    "minimal": "minimal：最省推理，速度最快",
+    "low": "low：少量推理",
+    "medium": "medium：均衡（推荐）",
+    "high": "high：最充分推理，耗时最长",
+}
 _EFFORT_LABELS = dict(EFFORT_CHOICES)
 _EFFORT_ORDER: list[str] = [value for value, _ in EFFORT_CHOICES]
 
@@ -71,8 +80,13 @@ _MAX_MODEL_ROWS = 6
 
 
 def effort_label(value: str) -> str:
-    """Chinese label for an effort value; unknown/empty → 「不指定」."""
-    return _EFFORT_LABELS.get((value or "").strip().lower(), "不指定")
+    """Label for an effort value; the name matches the API parameter value."""
+    return _EFFORT_LABELS.get((value or "").strip().lower(), "默认")
+
+
+def effort_help(value: str) -> str:
+    """One-line explanation of what an effort value actually does."""
+    return _EFFORT_HELP.get((value or "").strip().lower(), _EFFORT_HELP[""])
 
 
 def _shorten(text: str, limit: int = 30) -> str:
@@ -114,8 +128,8 @@ class ModelPickerButton(QPushButton):
         self.setToolTip(
             f"切换服务商 / 模型，调整推理强度{provider}\n"
             f"模型：{self._model or '（未设置）'}\n"
-            f"推理强度：{effort_label(self._effort)}"
-            + ("" if self._effort else "（请求里不带该参数）")
+            f"推理强度：{effort_help(self._effort)}\n"
+            + (f"请求参数：reasoning_effort={self._effort}" if self._effort else "请求参数：无")
         )
 
 
@@ -254,8 +268,9 @@ class ModelPickerPopup(QFrame):
         self.slider.setPageStep(1)
         self.slider.setTracking(True)
         self.slider.setToolTip(
-            "推理强度：仅对支持该参数的模型生效。\n"
-            "「不指定」时请求里不带 reasoning_effort，兼容所有接口。"
+            "档位名与 API 参数 reasoning_effort 的取值一致：\n"
+            "默认（不发送参数） / minimal / low / medium / high\n"
+            "仅对支持该参数的模型生效；网关不支持时会自动去掉重试。"
         )
         self.slider.valueChanged.connect(self._on_slider_value)
         line.addWidget(self.slider, 1)
@@ -265,7 +280,8 @@ class ModelPickerPopup(QFrame):
         self.effort_name.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
-        self.effort_name.setFixedWidth(34)
+        self.effort_name.setFixedWidth(56)
+        self.effort_name.setToolTip(effort_help(""))
         line.addWidget(self.effort_name)
         layout.addLayout(line)
 
@@ -472,6 +488,7 @@ class ModelPickerPopup(QFrame):
         if self._effort not in _EFFORT_ORDER:
             self._effort = ""
         self.effort_name.setText(effort_label(self._effort))
+        self.effort_name.setToolTip(effort_help(self._effort))
         self.slider.blockSignals(True)
         self.slider.setValue(_EFFORT_ORDER.index(self._effort))
         self.slider.blockSignals(False)

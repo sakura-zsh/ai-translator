@@ -674,9 +674,12 @@ class MainWindow(QMainWindow):
         self._save_config()
         self._refresh_model_picker()
         if profile.reasoning_effort:
-            self._set_status(f"推理强度：{effort_label(profile.reasoning_effort)}")
+            self._set_status(
+                f"推理强度：{effort_label(profile.reasoning_effort)}"
+                f"（reasoning_effort={profile.reasoning_effort}）"
+            )
         else:
-            self._set_status("推理强度：不指定（请求不带该参数）")
+            self._set_status("推理强度：默认（请求不带该参数）")
 
     def _on_scene_changed(self, _index: int) -> None:
         sid = self.scene_combo.currentData()

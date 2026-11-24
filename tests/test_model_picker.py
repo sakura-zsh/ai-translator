@@ -35,6 +35,7 @@ from app.ui.model_picker import (  # noqa: E402
     _ROLE_MODEL,
     _ROLE_PROFILE,
     ModelPickerPopup,
+    effort_help,
     effort_label,
     model_display,
 )
@@ -464,6 +465,16 @@ def test_provider_without_candidates_mutes_the_list(window: MainWindow) -> None:
     assert window.model_popup.list.count() == 1  # a single hint row
     assert window.model_popup.list.isEnabled() is False
     assert seen == [True]
+
+
+def test_effort_labels_match_api_values() -> None:
+    # The visible label must be the exact value sent as reasoning_effort,
+    # otherwise users cannot tell which level they actually selected.
+    assert effort_label("") == "默认"
+    for value in ("minimal", "low", "medium", "high"):
+        assert effort_label(value) == value
+        assert value in effort_help(value)
+    assert "reasoning_effort" in effort_help("")
 
 
 def test_effort_slider_writes_profile_and_reset(window: MainWindow) -> None:
