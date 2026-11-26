@@ -2,65 +2,62 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, feat/tauri-rewrite]
   pull_request:
 
 jobs:
-  test:
+  rust-and-frontend:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.11", "3.12", "3.13"]
-
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Install system libraries for offscreen Qt
+      - name: Install Linux WebKit & Tauri system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
+            patchelf pkg-config libssl-dev libgtk-3-dev
 
-      - name: Install project + dev tools
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Frontend install, typecheck, test, build
         run: |
-          python -m pip install --upgrade pip
-          pip install -e .[dev]
+          pnpm install --allow-build esbuild
+          pnpm typecheck
+          pnpm test
+          pnpm build
 
-      - name: Ruff
-        run: ruff check app tests
-
-      - name: Tests (offscreen Qt)
-        env:
-          QT_QPA_PLATFORM: offscreen
-        run: pytest -q
-
-      - name: mypy (non-blocking, observe first)
-        continue-on-error: true
-        run: mypy app
+      - name: Rust tests & clippy
+        run: |
+          cargo test --workspace
+          cargo clippy --workspace -- -D warnings
 
   windows-build:
-    # Smoke-build the PyInstaller bundle on every push to keep §packaging
-    # from rotting. Not uploaded; full release builds stay local.
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: pnpm/action-setup@v4
         with:
-          python-version: "3.12"
-      - name: Install dependencies
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Build Windows Tauri & CLI
         run: |
-          python -m pip install --upgrade pip
-          pip install -e .
-          pip install pyinstaller
-      - name: Build (onedir)
-        run: >
-          python -m PyInstaller --noconfirm
-          --distpath packaging\windows\dist
-          --workpath packaging\windows\build
-          packaging\windows\ai-translator.spec
+          pnpm install --allow-build esbuild
+          pnpm build
+          cargo check --workspace
+          cargo build --release -p ai-translator-cli

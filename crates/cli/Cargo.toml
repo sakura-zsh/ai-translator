@@ -1,0 +1,14 @@
+[package]
+name = "ai-translator-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ai-translator-cli"
+path = "src/main.rs"
+
+[dependencies]
+ai-translator-core = { path = "../core" }
+clap.workspace = true
+tokio.workspace = true

@@ -1,50 +1,57 @@
 # Maintainer: sakura
 pkgname=ai-translator
-pkgver=0.5.0
+pkgver=0.6.0
 pkgrel=1
-pkgdesc="Lightweight cross-platform AI translator (Linux/Wayland)"
-arch=('any')
+pkgdesc="Lightweight cross-platform AI translator (Tauri v2 + Rust)"
+arch=('x86_64')
 url="https://github.com/anomalyco/ai-translator"
 license=('MIT')
+options=('!lto')
 depends=(
-  'python>=3.11'
-  'pyside6'
-  'python-httpx'
-  'python-pillow'
+  'webkit2gtk-4.1'
+  'gtk3'
+  'libappindicator-gtk3'
+  'openssl'
 )
 makedepends=(
-  'python-build'
-  'python-installer'
-  'python-wheel'
-  'python-setuptools'
+  'rust'
+  'cargo'
+  'nodejs'
+  'pnpm'
 )
 optdepends=(
   'grim: Wayland screenshot capture'
   'slurp: Wayland region selection'
-  'wl-clipboard: clipboard image paste'
+  'wl-clipboard: clipboard image paste and CLI copy'
+  'libnotify: CLI desktop notifications'
   'tesseract: OCR image translation mode'
   'tesseract-data-eng: English OCR language data'
   'tesseract-data-chi_sim: Simplified Chinese OCR language data'
-  'python-edge-tts: TTS pronunciation (AUR; without it the speak buttons show an error)'
 )
 source=("$pkgname-$pkgver.tar.gz")
 sha256sums=('SKIP')
 
 build() {
   cd "$pkgname-$pkgver"
-  python -m build --wheel --no-isolation
+  pnpm install --frozen-lockfile --allow-build esbuild || pnpm install --allow-build esbuild
+  pnpm build
+  cargo build --release --locked -p ai-translator --features custom-protocol || \
+    cargo build --release -p ai-translator --features custom-protocol
+  cargo build --release --locked -p ai-translator-cli || \
+    cargo build --release -p ai-translator-cli
 }
 
 package() {
   cd "$pkgname-$pkgver"
-  python -m installer --destdir="$pkgdir" dist/*.whl
-
-  # Always install an explicit launcher (do not rely solely on wheel scripts).
-  install -Dm755 packaging/linux/ai-translator \
+  install -Dm755 target/release/ai-translator \
     "$pkgdir/usr/bin/ai-translator"
+  install -Dm755 target/release/ai-translator-cli \
+    "$pkgdir/usr/bin/ai-translator-cli"
 
   install -Dm644 packaging/linux/ai-translator.desktop \
     "$pkgdir/usr/share/applications/ai-translator.desktop"
+  install -Dm644 src-tauri/icons/128x128.png \
+    "$pkgdir/usr/share/icons/hicolor/128x128/apps/ai-translator.png"
 
   install -Dm644 LICENSE \
     "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
