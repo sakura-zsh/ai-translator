@@ -18,9 +18,10 @@ use ai_translator_core::jev_client::JevClient;
 use ai_translator_core::languages::{target_languages, LanguageItem, SOURCE_LANGUAGES};
 use ai_translator_core::llm_client::LlmClient;
 use ai_translator_core::ocr::OcrService;
+#[cfg(not(target_os = "windows"))]
+use ai_translator_core::platform::capture_region_wayland;
 use ai_translator_core::platform::{
-    capture_region_wayland, read_clipboard_image_png, read_primary_selection_text,
-    write_clipboard_text,
+    read_clipboard_image_png, read_selected_text_for_quick, write_clipboard_text,
 };
 use ai_translator_core::presets::{
     all_scene_presets, format_glossary, parse_glossary, ScenePreset, AUTO_SCENE_ID,
@@ -77,6 +78,10 @@ pub async fn get_bootstrap(
     state: State<'_, Arc<AppState>>,
 ) -> Result<BootstrapData, String> {
     let mut cfg = state.config.lock().await;
+    #[cfg(target_os = "windows")]
+    {
+        cfg.ui.auto_start = crate::autostart_win::is_enabled();
+    }
     let previous_version = cfg.last_run_version.clone();
     if cfg.last_run_version != APP_VERSION {
         cfg.last_run_version = APP_VERSION.to_string();
@@ -114,6 +119,10 @@ pub async fn save_config(
             new_config.last_run_version = guard.last_run_version.clone();
         }
         *guard = new_config.clone();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        crate::autostart_win::set_enabled(new_config.ui.auto_start)?;
     }
     state.store.save(&new_config).map_err(|e| e.to_string())?;
     #[cfg(target_os = "windows")]
@@ -155,6 +164,9 @@ pub async fn import_config_json(
     state.store.save(&imported).map_err(|e| e.to_string())?;
     #[cfg(target_os = "windows")]
     {
+        if let Err(e) = crate::autostart_win::set_enabled(imported.ui.auto_start) {
+            warn!("Failed to apply autostart on config import: {e}");
+        }
         crate::register_windows_hotkeys(
             &app,
             &imported.ui.hotkeys.summon,
@@ -260,6 +272,7 @@ pub struct TranslateCommandOutput {
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn translate_text_cmd(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
@@ -268,17 +281,33 @@ pub async fn translate_text_cmd(
     target_lang: String,
     scene: String,
     request_id: Option<String>,
+    quick: Option<bool>,
 ) -> Result<TranslateCommandOutput, String> {
+    let use_quick = quick == Some(true);
     let (profile, mut translation_cfg, jev_cfg) = {
         let mut guard = state.config.lock().await;
         guard.translation.source_lang = source_lang.clone();
         guard.translation.target_lang = target_lang.clone();
         guard.translation.scene = scene.clone();
-        (
-            guard.get_active_profile().clone(),
-            guard.translation.clone(),
-            guard.jev.clone(),
-        )
+        let mut prof = if use_quick && !guard.translation.quick_profile_id.trim().is_empty() {
+            guard
+                .get_profile(&guard.translation.quick_profile_id)
+                .unwrap_or_else(|| guard.get_active_profile())
+                .clone()
+        } else {
+            guard.get_active_profile().clone()
+        };
+        if use_quick {
+            let qm = guard.translation.quick_model.trim();
+            if !qm.is_empty() {
+                prof.model = qm.to_string();
+            }
+            let qe = guard.translation.quick_reasoning_effort.trim();
+            if qe != "__follow__" {
+                prof.reasoning_effort = sanitize_reasoning_effort(qe);
+            }
+        }
+        (prof, guard.translation.clone(), guard.jev.clone())
     };
     translation_cfg.scene = scene;
 
@@ -536,10 +565,12 @@ pub async fn complete_windows_screenshot(
 // ── Quick Selection Popup ─────────────────────────────────────────
 
 pub async fn trigger_quick_popup(app: &AppHandle, state: &Arc<AppState>) {
-    let text = read_primary_selection_text().await.unwrap_or_default();
+    let text = read_selected_text_for_quick().await.unwrap_or_default();
     *state.pending_quick_text.lock().await = Some(text.clone());
 
     if let Some(win) = app.get_webview_window("quick") {
+        crate::quick_win::apply_single_rounded_corner(&win);
+        crate::quick_win::place_near_cursor(app, &win);
         let _ = win.show();
         let _ = win.unminimize();
         let _ = win.set_focus();
@@ -556,12 +587,21 @@ pub async fn trigger_quick_popup(app: &AppHandle, state: &Arc<AppState>) {
     .decorations(false)
     .always_on_top(true)
     .skip_taskbar(true)
-    .inner_size(500.0, 390.0)
-    .min_inner_size(380.0, 280.0)
-    .center()
+    .inner_size(
+        crate::quick_win::QUICK_WIDTH_LOGICAL,
+        crate::quick_win::QUICK_HEIGHT_LOGICAL,
+    )
+    .min_inner_size(
+        crate::quick_win::QUICK_MIN_WIDTH_LOGICAL,
+        crate::quick_win::QUICK_MIN_HEIGHT_LOGICAL,
+    )
+    .visible(false)
     .build()
     {
         Ok(win) => {
+            crate::quick_win::apply_single_rounded_corner(&win);
+            crate::quick_win::place_near_cursor(app, &win);
+            let _ = win.show();
             let _ = win.set_focus();
         }
         Err(e) => warn!("Failed to open quick window: {e}"),

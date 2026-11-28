@@ -80,6 +80,7 @@ function MainApp() {
   const draggingSplit = useRef(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const activeReqRef = useRef<string>("");
+  const screenshotIntentRef = useRef<"translate" | "extract">("translate");
 
   useEffect(() => {
     if (!config) return;
@@ -311,8 +312,28 @@ function MainApp() {
     [config, speakSide],
   );
 
+  const runExtractOcrFromB64 = useCallback(
+    async (b64: string) => {
+      if (busy) return;
+      setBusy(true);
+      setPendingImageB64(b64);
+      setStatus("正在 OCR 提取文字…");
+      try {
+        const text = await api.extractOcrText(b64);
+        setSourceText(text);
+        setStatus("已提取文字并复制到剪贴板");
+      } catch (e) {
+        setStatus(`提取失败：${String(e)}`);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [busy],
+  );
+
   const handleScreenshot = useCallback(async () => {
     if (!config || busy) return;
+    screenshotIntentRef.current = "translate";
     setStatus("请选择截图区域…");
     try {
       const b64 = await api.captureScreenshot();
@@ -338,29 +359,24 @@ function MainApp() {
 
   const handleExtractText = useCallback(async () => {
     if (!config || busy) return;
-    setBusy(true);
-    try {
-      let b64 = pendingImageB64;
-      if (!b64) {
-        setStatus("请选择要提取文字的截图区域…");
-        b64 = await api.captureScreenshot();
-        if (!b64) {
-          setStatus("已取消");
-          setBusy(false);
-          return;
-        }
-        setPendingImageB64(b64);
-      }
-      setStatus("正在 OCR 提取文字…");
-      const text = await api.extractOcrText(b64);
-      setSourceText(text);
-      setStatus("已提取文字并复制到剪贴板");
-    } catch (e) {
-      setStatus(`提取失败：${String(e)}`);
-    } finally {
-      setBusy(false);
+    if (pendingImageB64) {
+      await runExtractOcrFromB64(pendingImageB64);
+      return;
     }
-  }, [config, busy, pendingImageB64]);
+    screenshotIntentRef.current = "extract";
+    setStatus("请选择要提取文字的截图区域…");
+    try {
+      const b64 = await api.captureScreenshot();
+      if (b64) {
+        await runExtractOcrFromB64(b64);
+      } else if (!boot?.is_windows) {
+        setStatus("已取消");
+      }
+    } catch (e) {
+      screenshotIntentRef.current = "translate";
+      setStatus(`提取失败：${String(e)}`);
+    }
+  }, [config, busy, pendingImageB64, boot?.is_windows, runExtractOcrFromB64]);
 
   const handleSwapLangs = useCallback(async () => {
     if (!config || config.translation.source_lang === "auto") return;
@@ -455,10 +471,16 @@ function MainApp() {
         else if (event.payload === "paste_image") void handlePasteImage();
       }),
       listen<string | null>("screenshot-result", (event) => {
+        const intent = screenshotIntentRef.current;
+        screenshotIntentRef.current = "translate";
         if (event.payload) {
-          void translateCapturedImage(event.payload);
+          if (intent === "extract") {
+            void runExtractOcrFromB64(event.payload);
+          } else {
+            void translateCapturedImage(event.payload);
+          }
         } else {
-          setStatus("截图已取消");
+          setStatus(intent === "extract" ? "已取消" : "截图已取消");
         }
       }),
       listen<string>("status-toast", (event) => {
@@ -470,7 +492,13 @@ function MainApp() {
         p.then((fn) => fn()).catch(() => {});
       }
     };
-  }, [handleScreenshot, handleExtractText, handlePasteImage, translateCapturedImage]);
+  }, [
+    handleScreenshot,
+    handleExtractText,
+    handlePasteImage,
+    translateCapturedImage,
+    runExtractOcrFromB64,
+  ]);
 
   useEffect(() => {
     const win = getCurrentWindow();
@@ -479,11 +507,15 @@ function MainApp() {
       window.clearTimeout(timer);
       timer = window.setTimeout(async () => {
         try {
-          const maximized = await win.isMaximized();
-          const size = await win.innerSize();
+          const [maximized, size, scale] = await Promise.all([
+            win.isMaximized(),
+            win.innerSize(),
+            win.scaleFactor(),
+          ]);
+          const factor = scale > 0 ? scale : 1;
           await api.saveWindowGeometry({
-            width: size.width,
-            height: size.height,
+            width: maximized ? undefined : Math.round(size.width / factor),
+            height: maximized ? undefined : Math.round(size.height / factor),
             maximized,
           });
         } catch {

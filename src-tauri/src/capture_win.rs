@@ -12,24 +12,27 @@ use base64::Engine;
 #[cfg(target_os = "windows")]
 use image::{DynamicImage, ImageFormat, RgbaImage};
 #[cfg(target_os = "windows")]
-use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{
+    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Position, Size, State, WebviewUrl,
+    WebviewWindowBuilder,
+};
 
 #[cfg(target_os = "windows")]
 use crate::commands::{AppState, CropRect};
 
 #[cfg(target_os = "windows")]
-pub async fn start_region_capture(
-    app: AppHandle,
-    state: State<'_, Arc<AppState>>,
-) -> Result<Option<String>, String> {
-    if let Some(main_win) = app.get_webview_window("main") {
-        let _ = main_win.hide();
-        tokio::time::sleep(std::time::Duration::from_millis(160)).await;
-    }
+struct CapturedDesktop {
+    min_x: i32,
+    min_y: i32,
+    total_w: u32,
+    total_h: u32,
+    png_bytes: Vec<u8>,
+}
 
+#[cfg(target_os = "windows")]
+fn capture_virtual_desktop() -> Result<CapturedDesktop, String> {
     let monitors = xcap::Monitor::all().map_err(|e| format!("枚举显示器失败：{e}"))?;
     if monitors.is_empty() {
-        restore_main(&app);
         return Err("未检测到可用显示器".to_string());
     }
 
@@ -45,8 +48,8 @@ pub async fn start_region_capture(
     }
     let mut shots = Vec::new();
     for mon in monitors {
-        let x = mon.x();
-        let y = mon.y();
+        let x = mon.x().map_err(|e| format!("获取显示器位置失败：{e}"))?;
+        let y = mon.y().map_err(|e| format!("获取显示器位置失败：{e}"))?;
         let img = mon.capture_image().map_err(|e| format!("屏幕捕获失败：{e}"))?;
         min_x = min_x.min(x);
         min_y = min_y.min(y);
@@ -69,7 +72,38 @@ pub async fn start_region_capture(
         .write_to(&mut png, ImageFormat::Png)
         .map_err(|e| format!("编码屏幕截图失败：{e}"))?;
 
-    *state.pending_screenshot_png.lock().await = Some(png.into_inner());
+    Ok(CapturedDesktop {
+        min_x,
+        min_y,
+        total_w,
+        total_h,
+        png_bytes: png.into_inner(),
+    })
+}
+
+#[cfg(target_os = "windows")]
+pub async fn start_region_capture(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Option<String>, String> {
+    if let Some(main_win) = app.get_webview_window("main") {
+        let _ = main_win.hide();
+        tokio::time::sleep(std::time::Duration::from_millis(160)).await;
+    }
+
+    let captured = match tokio::task::spawn_blocking(capture_virtual_desktop).await {
+        Ok(Ok(c)) => c,
+        Ok(Err(e)) => {
+            restore_main(&app);
+            return Err(e);
+        }
+        Err(e) => {
+            restore_main(&app);
+            return Err(format!("屏幕捕获线程异常：{e}"));
+        }
+    };
+
+    *state.pending_screenshot_png.lock().await = Some(captured.png_bytes);
 
     if let Some(old) = app.get_webview_window("screenshot") {
         let _ = old.close();
@@ -84,13 +118,25 @@ pub async fn start_region_capture(
     .decorations(false)
     .always_on_top(true)
     .skip_taskbar(true)
-    .position(min_x as f64, min_y as f64)
-    .inner_size(total_w as f64, total_h as f64)
+    .visible(false)
     .build()
     .map_err(|e| {
         restore_main(&app);
         format!("创建截图框选窗口失败：{e}")
     })?;
+    let _ = win.set_position(Position::Physical(PhysicalPosition {
+        x: captured.min_x,
+        y: captured.min_y,
+    }));
+    let _ = win.set_size(Size::Physical(PhysicalSize {
+        width: captured.total_w,
+        height: captured.total_h,
+    }));
+    let _ = win.set_position(Position::Physical(PhysicalPosition {
+        x: captured.min_x,
+        y: captured.min_y,
+    }));
+    let _ = win.show();
     let _ = win.set_focus();
     Ok(None)
 }

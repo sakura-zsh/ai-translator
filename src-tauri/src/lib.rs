@@ -1,7 +1,9 @@
 //! Tauri v2 desktop shell: single-instance, quick popup, logging, tray, global hotkeys, and IPC.
 
+mod autostart_win;
 mod capture_win;
 mod commands;
+mod quick_win;
 
 use std::env;
 use std::path::PathBuf;

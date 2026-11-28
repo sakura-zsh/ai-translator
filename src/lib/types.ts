@@ -77,6 +77,9 @@ export interface TranslationConfig {
   glossary: Record<string, string>;
   tesseract_path: string;
   custom_scenes: CustomScene[];
+  quick_profile_id: string;
+  quick_model: string;
+  quick_reasoning_effort: string;
 }
 
 export interface HotkeysConfig {
@@ -103,6 +106,7 @@ export interface UiConfig {
   window_maximized: boolean;
   splitter_sizes: number[];
   close_to_tray: boolean;
+  auto_start: boolean;
   hotkeys: HotkeysConfig;
 }
 

@@ -1045,6 +1045,108 @@ export function SettingsModal({
                   </div>
                 )}
               </div>
+
+              <div className="space-y-3 rounded-[20px] border border-[var(--md-sys-color-outline-variant)]/60 bg-[var(--md-sys-color-surface-container)] p-4">
+                <div>
+                  <div className="text-sm font-medium">划词 / 快速翻译专用模型（可选）</div>
+                  <p className="mt-0.5 text-xs text-[var(--md-sys-color-on-surface-variant)]">
+                    为小窗划词翻译单独指定低延迟服务商与模型；留空则跟随主窗口当前服务商与模型。
+                  </p>
+                </div>
+                <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-3">
+                  <div>
+                    <label className="mb-1.5 block text-xs font-medium text-[var(--md-sys-color-on-surface-variant)]">
+                      划词服务商
+                    </label>
+                    <select
+                      value={draft.translation.quick_profile_id}
+                      onChange={(e) =>
+                        setDraft((prev) => ({
+                          ...prev,
+                          translation: {
+                            ...prev.translation,
+                            quick_profile_id: e.target.value,
+                            quick_model: "",
+                          },
+                        }))
+                      }
+                      className={inputCls}
+                    >
+                      <option value="">跟随主窗口当前服务商</option>
+                      {draft.profiles.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="mb-1.5 block text-xs font-medium text-[var(--md-sys-color-on-surface-variant)]">
+                      划词模型（留空跟随服务商当前模型）
+                    </label>
+                    {(() => {
+                      const qProf =
+                        draft.profiles.find((p) => p.id === draft.translation.quick_profile_id) ??
+                        draft.profiles.find((p) => p.id === draft.active_profile_id) ??
+                        draft.profiles[0];
+                      const quickCandidates = Array.from(
+                        new Set([...(qProf?.models ?? []), ...(qProf?.model_options ?? [])]),
+                      ).slice(0, 200);
+                      return (
+                        <>
+                          <input
+                            type="text"
+                            list="quick-model-list"
+                            value={draft.translation.quick_model}
+                            onChange={(e) =>
+                              setDraft((prev) => ({
+                                ...prev,
+                                translation: {
+                                  ...prev.translation,
+                                  quick_model: e.target.value,
+                                },
+                              }))
+                            }
+                            placeholder={qProf?.model || "跟随服务商默认模型"}
+                            className={`${inputCls} font-mono-editor`}
+                          />
+                          <datalist id="quick-model-list">
+                            {quickCandidates.map((m) => (
+                              <option key={m} value={m} />
+                            ))}
+                          </datalist>
+                        </>
+                      );
+                    })()}
+                  </div>
+                  <div>
+                    <label className="mb-1.5 block text-xs font-medium text-[var(--md-sys-color-on-surface-variant)]">
+                      划词推理强度
+                    </label>
+                    <select
+                      value={draft.translation.quick_reasoning_effort}
+                      onChange={(e) =>
+                        setDraft((prev) => ({
+                          ...prev,
+                          translation: {
+                            ...prev.translation,
+                            quick_reasoning_effort: e.target.value,
+                          },
+                        }))
+                      }
+                      className={inputCls}
+                    >
+                      <option value="">不开启 / 默认（最低延迟）</option>
+                      <option value="low">low</option>
+                      <option value="medium">medium</option>
+                      <option value="high">high</option>
+                      <option value="xhigh">xhigh</option>
+                      <option value="max">max</option>
+                      <option value="__follow__">跟随服务商当前档位</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
             </div>
           )}
 
@@ -1333,6 +1435,19 @@ export function SettingsModal({
                 }
                 label="关闭窗口时最小化到系统托盘（无托盘环境自动降级为正常退出）"
               />
+
+              {isWindows && (
+                <M3Switch
+                  checked={draft.ui.auto_start}
+                  onChange={(v) =>
+                    setDraft((prev) => ({
+                      ...prev,
+                      ui: { ...prev.ui, auto_start: v },
+                    }))
+                  }
+                  label="开机自启（Windows 登录后自动启动）"
+                />
+              )}
 
               <div className="rounded-[20px] border border-[var(--md-sys-color-outline-variant)]/60 bg-[var(--md-sys-color-surface-container)] p-4">
                 <div className="mb-3 text-sm font-medium">快捷键配置</div>

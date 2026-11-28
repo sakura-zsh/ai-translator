@@ -58,6 +58,7 @@ export const api = {
     targetLang: string,
     scene: string,
     requestId?: string,
+    quick?: boolean,
   ) =>
     invoke<TranslateCommandOutput>("translate_text_cmd", {
       text,
@@ -65,6 +66,7 @@ export const api = {
       targetLang,
       scene,
       requestId: requestId ?? null,
+      quick: quick ?? null,
     }),
 
   translateImage: (

@@ -483,6 +483,9 @@ pub struct TranslationConfig {
     pub glossary: IndexMap<String, String>,
     pub tesseract_path: String,
     pub custom_scenes: Vec<CustomScene>,
+    pub quick_profile_id: String,
+    pub quick_model: String,
+    pub quick_reasoning_effort: String,
 }
 
 impl Default for TranslationConfig {
@@ -499,6 +502,9 @@ impl Default for TranslationConfig {
             glossary: IndexMap::new(),
             tesseract_path: String::new(),
             custom_scenes: Vec::new(),
+            quick_profile_id: String::new(),
+            quick_model: String::new(),
+            quick_reasoning_effort: String::new(),
         }
     }
 }
@@ -506,6 +512,14 @@ impl Default for TranslationConfig {
 impl TranslationConfig {
     pub fn sanitize(&mut self) {
         self.custom_scenes = sanitize_custom_scenes(&self.custom_scenes);
+        self.quick_profile_id = self.quick_profile_id.trim().to_string();
+        self.quick_model = self.quick_model.trim().to_string();
+        let q_eff = self.quick_reasoning_effort.trim();
+        self.quick_reasoning_effort = if q_eff == "__follow__" {
+            "__follow__".to_string()
+        } else {
+            sanitize_reasoning_effort(q_eff)
+        };
         let mut clean_glossary = IndexMap::new();
         for (k, v) in self.glossary.iter().take(GLOSSARY_MAX) {
             let ks = k.trim();
@@ -549,6 +563,15 @@ impl TranslationConfig {
         }
         if let Some(s) = obj.get("tesseract_path").and_then(Value::as_str) {
             c.tesseract_path = s.to_string();
+        }
+        if let Some(s) = obj.get("quick_profile_id").and_then(Value::as_str) {
+            c.quick_profile_id = s.to_string();
+        }
+        if let Some(s) = obj.get("quick_model").and_then(Value::as_str) {
+            c.quick_model = s.to_string();
+        }
+        if let Some(s) = obj.get("quick_reasoning_effort").and_then(Value::as_str) {
+            c.quick_reasoning_effort = s.to_string();
         }
         if let Some(map) = obj.get("glossary").and_then(Value::as_object) {
             for (k, v) in map.iter().take(GLOSSARY_MAX) {
@@ -710,6 +733,7 @@ pub struct UiConfig {
     pub window_maximized: bool,
     pub splitter_sizes: Vec<i32>,
     pub close_to_tray: bool,
+    pub auto_start: bool,
     pub hotkeys: HotkeysConfig,
 }
 
@@ -722,6 +746,7 @@ impl Default for UiConfig {
             window_maximized: false,
             splitter_sizes: Vec::new(),
             close_to_tray: true,
+            auto_start: false,
             hotkeys: HotkeysConfig::default(),
         }
     }
@@ -750,6 +775,9 @@ impl UiConfig {
         }
         if let Some(b) = obj.get("close_to_tray").and_then(Value::as_bool) {
             u.close_to_tray = b;
+        }
+        if let Some(b) = obj.get("auto_start").and_then(Value::as_bool) {
+            u.auto_start = b;
         }
         if let Some(arr) = obj.get("splitter_sizes").and_then(Value::as_array) {
             u.splitter_sizes = arr
@@ -1331,5 +1359,32 @@ mod tests {
         assert_eq!(p.model, "b");
         assert_eq!(p.vision_model, "");
         assert!(!p.remove_model("b"));
+    }
+
+    #[test]
+    fn ui_auto_start_defaults_false_and_roundtrips() {
+        let cfg = AppConfig::from_json_value(&json!({ "ui": {} }));
+        assert!(!cfg.ui.auto_start);
+        let cfg_on = AppConfig::from_json_value(&json!({ "ui": { "auto_start": true } }));
+        assert!(cfg_on.ui.auto_start);
+    }
+
+    #[test]
+    fn quick_model_fields_sanitize_and_roundtrip() {
+        let cfg = AppConfig::from_json_value(&json!({
+            "translation": {
+                "quick_profile_id": " fast ",
+                "quick_model": " gpt-4o-mini ",
+                "quick_reasoning_effort": "__follow__"
+            }
+        }));
+        assert_eq!(cfg.translation.quick_profile_id, "fast");
+        assert_eq!(cfg.translation.quick_model, "gpt-4o-mini");
+        assert_eq!(cfg.translation.quick_reasoning_effort, "__follow__");
+
+        let cfg2 = AppConfig::from_json_value(&json!({
+            "translation": { "quick_reasoning_effort": "INVALID" }
+        }));
+        assert_eq!(cfg2.translation.quick_reasoning_effort, "");
     }
 }

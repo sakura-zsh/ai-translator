@@ -35,6 +35,8 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "windows-sys 0.59.0",
+ "winreg",
  "xcap",
 ]
 
@@ -70,6 +72,8 @@ dependencies = [
  "tracing",
  "uuid",
  "which",
+ "windows 0.60.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

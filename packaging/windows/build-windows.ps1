@@ -4,7 +4,7 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 Push-Location $Root
 try {
-    pnpm install --allow-build esbuild
+    pnpm install
     pnpm tauri build
     cargo build --release -p ai-translator-cli
     Write-Host "GUI bundle: $Root\target\release\bundle"

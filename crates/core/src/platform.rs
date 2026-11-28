@@ -1,13 +1,16 @@
 //! Cross-platform desktop helpers: clipboard text/image, Wayland region screenshot, notifications.
 
+#[cfg(not(target_os = "windows"))]
 use std::process::Stdio;
 use std::time::Duration;
 
 use thiserror::Error;
+#[cfg(not(target_os = "windows"))]
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::time::timeout;
 
+#[cfg(not(target_os = "windows"))]
 use crate::imaging::normalize_to_png;
 
 #[derive(Debug, Error)]
@@ -90,6 +93,325 @@ pub async fn read_primary_selection_text() -> Result<String, PlatformError> {
         }
     }
     read_clipboard_text().await
+}
+
+/// Capture currently selected text for the quick-translate popup without ever
+/// falling back to stale clipboard contents when nothing is selected.
+pub async fn read_selected_text_for_quick() -> Result<String, PlatformError> {
+    #[cfg(target_os = "windows")]
+    {
+        tokio::task::spawn_blocking(capture_selected_text_windows)
+            .await
+            .map_err(|e| PlatformError::Failed(format!("选区捕获线程异常：{e}")))?
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        for (bin, args) in [
+            ("wl-paste", &["--primary", "--no-newline"][..]),
+            ("xclip", &["-selection", "primary", "-o"][..]),
+        ] {
+            if which::which(bin).is_err() {
+                continue;
+            }
+            if let Ok(Ok(out)) =
+                timeout(Duration::from_secs(3), Command::new(bin).args(args).output()).await
+            {
+                if out.status.success() {
+                    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if !s.is_empty() {
+                        return Ok(s);
+                    }
+                }
+            }
+        }
+        Ok(String::new())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn try_uia_selected_text_windows() -> Option<String> {
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Accessibility::{
+        CUIAutomation, IUIAutomation, IUIAutomationTextPattern, UIA_TextPatternId,
+    };
+
+    struct ComGuard(bool);
+    impl Drop for ComGuard {
+        fn drop(&mut self) {
+            if self.0 {
+                unsafe { CoUninitialize() };
+            }
+        }
+    }
+
+    unsafe {
+        let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let _com_guard = ComGuard(hr.is_ok());
+
+        let uia: IUIAutomation =
+            CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
+        let mut current = uia.GetFocusedElement().ok()?;
+        let walker = uia.ControlViewWalker().ok();
+
+        for _ in 0..8 {
+            if let Ok(pattern) =
+                current.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
+            {
+                if let Ok(ranges) = pattern.GetSelection() {
+                    let count = ranges.Length().unwrap_or(0);
+                    let mut parts = Vec::new();
+                    for idx in 0..count {
+                        if let Ok(range) = ranges.GetElement(idx) {
+                            if let Ok(bstr) = range.GetText(-1) {
+                                let s = bstr.to_string();
+                                let trimmed = s.trim();
+                                if !trimmed.is_empty() {
+                                    parts.push(trimmed.to_string());
+                                }
+                            }
+                        }
+                    }
+                    if !parts.is_empty() {
+                        return Some(parts.join("\n"));
+                    }
+                }
+            }
+            let Some(ref w) = walker else {
+                break;
+            };
+            match w.GetParentElement(&current) {
+                Ok(parent) => current = parent,
+                Err(_) => break,
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn capture_selected_text_windows() -> Result<String, PlatformError> {
+    use std::thread;
+    use windows_sys::Win32::System::DataExchange::GetClipboardSequenceNumber;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, MapVirtualKeyW, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
+        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, MAPVK_VK_TO_VSC, VK_CONTROL, VK_LCONTROL,
+        VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN,
+        VK_SHIFT,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowTextW};
+
+    let fg_title = unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.is_null() {
+            String::new()
+        } else {
+            let mut buf = [0u16; 128];
+            let n = GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
+            if n > 0 {
+                String::from_utf16_lossy(&buf[..n as usize])
+            } else {
+                String::new()
+            }
+        }
+    };
+
+    if let Some(uia_text) = try_uia_selected_text_windows() {
+        tracing::info!(
+            "Quick selection captured via UIA ({} chars, fg={:?})",
+            uia_text.chars().count(),
+            fg_title
+        );
+        return Ok(uia_text);
+    }
+
+    enum SavedClipboard {
+        Text(String),
+        Image {
+            width: usize,
+            height: usize,
+            bytes: Vec<u8>,
+        },
+        None,
+    }
+
+    let mut cb = arboard::Clipboard::new()
+        .map_err(|e| PlatformError::Failed(format!("无法访问剪贴板：{e}")))?;
+
+    let saved = if let Ok(t) = cb.get_text() {
+        SavedClipboard::Text(t)
+    } else if let Ok(img) = cb.get_image() {
+        SavedClipboard::Image {
+            width: img.width,
+            height: img.height,
+            bytes: img.bytes.into_owned(),
+        }
+    } else {
+        SavedClipboard::None
+    };
+
+    let seq_before = unsafe { GetClipboardSequenceNumber() };
+
+    let is_pressed = |vk: u16| -> bool {
+        (unsafe { GetAsyncKeyState(vk as i32) } as u16 & 0x8000) != 0
+    };
+
+    let key_input = |vk: u16, flags: u32| -> INPUT {
+        let scan = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) } as u16;
+        let ext = if matches!(vk, VK_RMENU | VK_RCONTROL | VK_LWIN | VK_RWIN) {
+            KEYEVENTF_EXTENDEDKEY
+        } else {
+            0
+        };
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: vk,
+                    wScan: scan,
+                    dwFlags: flags | ext,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }
+    };
+
+    let send_inputs = |inputs: &[INPUT]| {
+        if inputs.is_empty() {
+            return;
+        }
+        unsafe {
+            SendInput(
+                inputs.len() as u32,
+                inputs.as_ptr(),
+                std::mem::size_of::<INPUT>() as i32,
+            );
+        }
+    };
+
+    // Wait briefly for the user to finish releasing the trigger key (e.g. S/Q) and modifiers.
+    for _ in 0..25 {
+        let any_trigger_down = (0x30u16..=0x5A).any(is_pressed) || (0x70u16..=0x87).any(is_pressed);
+        let any_mod_down = is_pressed(VK_MENU)
+            || is_pressed(VK_LMENU)
+            || is_pressed(VK_RMENU)
+            || is_pressed(VK_SHIFT)
+            || is_pressed(VK_LSHIFT)
+            || is_pressed(VK_RSHIFT)
+            || is_pressed(VK_LWIN)
+            || is_pressed(VK_RWIN)
+            || is_pressed(VK_CONTROL)
+            || is_pressed(VK_LCONTROL)
+            || is_pressed(VK_RCONTROL);
+        if !any_trigger_down && !any_mod_down {
+            break;
+        }
+        thread::sleep(Duration::from_millis(12));
+    }
+
+    // If Alt is still held, press Ctrl before releasing Alt so browsers (Chrome/Edge)
+    // do not treat Alt release as a single-Alt menu bar focus trigger (SC_KEYMENU).
+    let alt_held = is_pressed(VK_MENU) || is_pressed(VK_LMENU) || is_pressed(VK_RMENU);
+    let mut pre_release: Vec<INPUT> = Vec::new();
+    let mut ctrl_already_down = false;
+    if alt_held {
+        pre_release.push(key_input(VK_CONTROL, 0));
+        ctrl_already_down = true;
+    }
+    for vk in [
+        VK_LMENU,
+        VK_RMENU,
+        VK_MENU,
+        VK_LSHIFT,
+        VK_RSHIFT,
+        VK_SHIFT,
+        VK_LWIN,
+        VK_RWIN,
+    ] {
+        if is_pressed(vk) {
+            pre_release.push(key_input(vk, KEYEVENTF_KEYUP));
+        }
+    }
+    if !ctrl_already_down {
+        for vk in [VK_LCONTROL, VK_RCONTROL, VK_CONTROL] {
+            if is_pressed(vk) {
+                pre_release.push(key_input(vk, KEYEVENTF_KEYUP));
+            }
+        }
+    }
+    if !pre_release.is_empty() {
+        send_inputs(&pre_release);
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    const VK_C: u16 = 0x43;
+    let mut copy_inputs: Vec<INPUT> = Vec::with_capacity(4);
+    if !ctrl_already_down {
+        copy_inputs.push(key_input(VK_CONTROL, 0));
+    }
+    copy_inputs.push(key_input(VK_C, 0));
+    copy_inputs.push(key_input(VK_C, KEYEVENTF_KEYUP));
+    copy_inputs.push(key_input(VK_CONTROL, KEYEVENTF_KEYUP));
+    send_inputs(&copy_inputs);
+
+    let mut copied = false;
+    for _ in 0..20 {
+        thread::sleep(Duration::from_millis(15));
+        let seq_now = unsafe { GetClipboardSequenceNumber() };
+        if seq_now != seq_before {
+            copied = true;
+            break;
+        }
+    }
+
+    if !copied {
+        tracing::info!(
+            "Quick selection Ctrl+C produced no clipboard change (fg={:?})",
+            fg_title
+        );
+        return Ok(String::new());
+    }
+
+    thread::sleep(Duration::from_millis(15));
+    let mut selected = String::new();
+    for _ in 0..3 {
+        if let Ok(t) = cb.get_text() {
+            selected = t.trim().to_string();
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    // Restore user's previous clipboard contents so quick-translate doesn't clobber it.
+    match saved {
+        SavedClipboard::Text(prev) => {
+            let _ = cb.set_text(prev);
+        }
+        SavedClipboard::Image {
+            width,
+            height,
+            bytes,
+        } => {
+            let _ = cb.set_image(arboard::ImageData {
+                width,
+                height,
+                bytes: std::borrow::Cow::Owned(bytes),
+            });
+        }
+        SavedClipboard::None => {
+            let _ = cb.clear();
+        }
+    }
+
+    tracing::info!(
+        "Quick selection captured via Ctrl+C ({} chars, fg={:?})",
+        selected.chars().count(),
+        fg_title
+    );
+    Ok(selected)
 }
 
 pub async fn read_clipboard_text() -> Result<String, PlatformError> {
